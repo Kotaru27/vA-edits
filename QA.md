@@ -22,3 +22,12 @@ Baseline GitHub `main`: `eacaa7dad6a5db03f26f59c6c52da64ad0879257`. Stability-on
 ## Release gate
 
 **Conditional candidate:** commit only with a reversible parent and verify a real video on Chrome (including multi-audio and failed recompression) before claiming production certification.
+
+## Hotfix addendum — valid videos falsely marked as missing streams (2026-10-20)
+
+- Cause identified in released `app.mjs`: `probeDetails()` used `ffmpeg.exec(['-hide_banner','-i',input])` and rejected input solely if captured log text did not match `/Stream #.*Video:/`. A browser with absent/delayed FFmpeg log messages could wrongly fail all queued MP4s before encoding.
+- Replaced log-based source and output inspection with `FFmpeg.ffprobe()` writing structured JSON into the FFmpeg virtual filesystem. Introduced `probe.mjs` for JSON parsing, all audio tracks and source duration/frame data. A fallback checks decoded video-frame success and audio map operations by FFmpeg exit status, even with empty logs.
+- **50/50 local Node tests passed** with the worker-test `--experimental-vm-modules` flag, including new JSON parser and fallback contract tests.
+- **Two headless Chromium simulations passed** with console logging disabled: nine-file batch using structured FFprobe metadata and nine-file batch with FFprobe deliberately disabled. In both, all nine video items completed and produced download links. The FFmpeg engine was simulated; these are not real WebAssembly encodes.
+- Native `ffprobe` wrote and parsed a real 4-second H.264/AAC sample into JSON via `-o` without relying on logs; confirmed one video stream and one audio stream.
+- The previous v6 live failure has not been reproduced with an actual 56 MB source file inside a deployed browser. This is a targeted, source-backed fix with remaining live verification required.

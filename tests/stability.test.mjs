@@ -40,7 +40,7 @@ test('target change preserves prior outputs and offers explicit recompression',(
 });
 test('output verification probes media and samples decoded frames without mandatory browser timeout',()=>{
  assert.match(js,/async function verifyMedia\(/);
- assert.match(js,/parseOutputStreams\(state\.log\)/);
+ assert.match(js,/inspectStreams\(ffmpeg,virtualOutput,token\)/);
  assert.match(js,/\['-v','error','-xerror'/);
  assert.doesNotMatch(js,/checkBrowserPlayback\(/);
 });
