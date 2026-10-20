@@ -5,12 +5,11 @@
   <meta name="theme-color" content="#f8f7f4">
   <title>Video Compressor — Compress with care</title>
   <meta name="description" content="Compress several videos to a chosen target size, privately in your browser.">
-  <link rel="stylesheet" href="./styles.css?v=5">
+  <link rel="stylesheet" href="./styles.css?v=6">
 </head>
 <body>
   <header class="site-header"><div class="brand"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>compress<span class="brand-dot">.</span></div><div class="header-right"><span class="local-tag"><span class="local-indicator"></span>On-device processing</span></div></header>
   <main class="layout">
-    <div class="intro"><span class="eyebrow">VIDEO / COMPRESSION</span><h1>Smaller video.<br><em>All the important details.</em></h1><p>Add one or more videos, choose the size for each, and download your results. No video uploads, no unnecessary previews.</p></div>
     <div class="workarea">
       <section class="work-panel" aria-label="Compression settings">
         <div class="panel-head"><div class="step-dot">01</div><h2>Source videos</h2></div>
@@ -31,7 +30,6 @@
               <button class="primary-action" type="button" id="compressButton" disabled><span id="actionLabel">Compress videos</span><span class="action-arrow" aria-hidden="true">↗</span></button>
               <button type="button" class="cancel-batch" id="cancelButton" hidden>Cancel</button>
             </div>
-            <div id="planInsight" class="plan-insight" hidden><span class="insight-label">Quality outlook</span><p id="qualityOutlook"></p></div>
             <div class="queue-progress" id="progressBlock" hidden aria-live="off"><div class="progress-line"><strong id="statusText">Preparing...</strong><span id="progressValue">0%</span></div><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Compression progress" id="progressTrack"><div id="progressFill"></div></div></div>
           </div>
         </div>
@@ -48,6 +46,6 @@
     <div class="dialog-tabs"><button type="button" id="originalTab" aria-pressed="true" class="preview-tab active">Original</button><button type="button" id="outputTab" aria-pressed="false" class="preview-tab">Compressed</button></div>
     <video id="previewVideo" controls playsinline preload="metadata"></video><p id="previewHelp" class="dialog-help">Click play to preview the video.</p>
   </dialog>
-  <script type="module" src="./app.mjs?v=5"></script>
+  <script type="module" src="./app.mjs?v=6"></script>
 </body>
 </html>

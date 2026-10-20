@@ -1,4 +1,4 @@
-# Video Compressor — browser edition v3
+# Video Compressor — browser edition v5
 
 Private video compression directly in the browser, hosted as a static site on GitHub Pages.
 
@@ -46,3 +46,15 @@ driven by the percentages reported by the running encoder rather than a simulate
 timer. Progress values may pause during engine loading, file I/O or heavy encoding;
 the display never treats visual progress as proof of a completed or playable file.
 On completion or cancellation the working-row fill disappears.
+
+## v5 queue-first screen and per-file quality estimate
+
+The large marketing introduction is removed so the upload field and video queue
+appear immediately below the header, reducing initial scrolling. The previous
+combined **Quality outlook** paragraph is gone. Each video displays its own
+estimate directly below its name, including expected detail softening, likely
+severe quality loss, targets at or above source size, or an indication that
+metadata is not yet available. Estimations update as browser or FFmpeg
+metadata becomes available and whenever the batch target is changed.
+These are bitrate-based predictions, not a measured quality score or a playback guarantee.
+The encoder, downloaded filenames, 8 MB default, and progress animation are unchanged.
