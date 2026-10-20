@@ -2,6 +2,8 @@ import {MB, MAX_INPUT_BYTES, formatBytes, formatTime, parseDuration, parseVideoI
 
 const WRAPPER_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/ffmpeg/0.12.15/umd';
 const CORE_CDN = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
+const CORE_ESM_CDN = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
+const CLASS_WORKER_URL = new URL('./video-worker.js', import.meta.url).href;
 const $ = id => document.getElementById(id);
 const els = {
   input: $('fileInput'), drop: $('dropzone'), uploadTitle: $('uploadTitle'),
@@ -16,7 +18,7 @@ const els = {
   resultNote: $('resultNote'), download: $('downloadLink'), previewHelp: $('previewHelp')
 };
 const state = { file: null, duration: NaN, width: 0, height: 0, fps: 0, audioPresent: true, sourceAudio: null,
-  originalURL: '', outputURL: '', busy: false, generation: 0, ffmpeg: null, log: '', phase: null, pendingOperation: false };
+  originalURL: '', outputURL: '', busy: false, generation: 0, ffmpeg: null, engineURLs: [], log: '', phase: null, pendingOperation: false };
 
 function setError(message) { els.error.textContent = message; els.error.hidden = !message; }
 function progress(value, text) {
@@ -152,6 +154,10 @@ function loadScript(url) {
     document.head.append(script);
   });
 }
+function releaseEngineURLs() {
+  for (const url of state.engineURLs) URL.revokeObjectURL(url);
+  state.engineURLs = [];
+}
 async function ensureEngine(token) {
   if (state.ffmpeg?.loaded) return state.ffmpeg;
   progress(1, 'Loading compression engine…');
@@ -169,19 +175,37 @@ async function ensureEngine(token) {
       progress(phase.from + Math.min(1, fraction) * (phase.to-phase.from), phase.label);
     }
   });
-  let classWorkerURL, coreURL, wasmURL;
+  let coreURL, moduleCoreURL, wasmURL;
   try {
-    [classWorkerURL,coreURL,wasmURL] = await Promise.all([
-      urlToBlobURL(`${WRAPPER_CDN}/814.ffmpeg.min.js`,'text/javascript'),
-      urlToBlobURL(`${CORE_CDN}/ffmpeg-core.js`,'text/javascript'),
-      urlToBlobURL(`${CORE_CDN}/ffmpeg-core.wasm`,'application/wasm')
+    [coreURL, moduleCoreURL, wasmURL] = await Promise.all([
+      urlToBlobURL(`${CORE_CDN}/ffmpeg-core.js`, 'text/javascript'),
+      urlToBlobURL(`${CORE_ESM_CDN}/ffmpeg-core.js`, 'text/javascript'),
+      urlToBlobURL(`${CORE_CDN}/ffmpeg-core.wasm`, 'application/wasm')
     ]);
+    state.engineURLs = [coreURL, moduleCoreURL, wasmURL];
     if (token !== state.generation) throw new Error('Operation canceled.');
-    const loaded = await ffmpeg.load({classWorkerURL,coreURL,wasmURL});
-    if (!ffmpeg.loaded && !loaded) throw new Error('Failed to initialize the video encoder.');
+    // The worker is hosted on our origin; the bundled 814.ffmpeg worker
+    // cannot reliably resolve runtime blob: core URLs on GitHub Pages.
+    let timer;
+    const boot = ffmpeg.load({classWorkerURL: CLASS_WORKER_URL, coreURL, moduleCoreURL, wasmURL});
+    try {
+      await Promise.race([
+        boot,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('The video engine did not start within 90 seconds. Check that your network permits the FFmpeg CDN files.')), 90000);
+        })
+      ]);
+    } finally { clearTimeout(timer); }
+    if (!ffmpeg.loaded) throw new Error('Failed to initialize the video encoder.');
     return ffmpeg;
-  } catch(err) { try { ffmpeg.terminate(); } catch {} state.ffmpeg = null; throw err; }
-  // Blob URLs remain active for the life of this page because FFmpeg workers can reload core assets.
+  } catch (err) {
+    try { ffmpeg.terminate(); } catch {}
+    if (state.ffmpeg === ffmpeg) state.ffmpeg = null;
+    releaseEngineURLs();
+    throw err;
+  }
+  // Engine Blob URLs remain active while the worker exists; cancellation revokes them.
+
 }
 async function safeDelete(ffmpeg, file) { try { await ffmpeg.deleteFile(file); } catch {} }
 function sourceVirtualName(file) {
@@ -334,6 +358,7 @@ function cancel() {
   ++state.generation;
   state.phase = null;
   if (state.ffmpeg) { try { state.ffmpeg.terminate(); } catch {} state.ffmpeg = null; }
+  releaseEngineURLs();
   setBusy(false); els.progress.hidden = true;
   setError('Compression canceled. Your original video is unchanged.');
 }
@@ -352,5 +377,5 @@ els.outputTab.addEventListener('click',()=>showPreview('output'));
 els.drop.addEventListener('drop',e => { if (!state.busy) selectFile(e.dataTransfer?.files?.[0]); });
 window.addEventListener('dragover',e=>e.preventDefault());
 window.addEventListener('drop',e=>e.preventDefault());
-window.addEventListener('beforeunload',() => { if (state.originalURL) URL.revokeObjectURL(state.originalURL); if (state.outputURL) URL.revokeObjectURL(state.outputURL); });
+window.addEventListener('beforeunload',() => { if (state.originalURL) URL.revokeObjectURL(state.originalURL); if (state.outputURL) URL.revokeObjectURL(state.outputURL); releaseEngineURLs(); });
 clearSelected();
