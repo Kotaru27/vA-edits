@@ -4,7 +4,7 @@ Upload a file, select a target size in decimal MB (1 MB = 1,000,000 bytes), enco
 
 ## Publish
 
-Upload the contents of this folder to any static HTTPS host such as GitHub Pages. Serve `index.html` at the site root. No build step, Node, native software, account, API key or backend is needed by the end user. The first use requires Internet access to retrieve the pinned FFmpeg engine from cdnjs and jsDelivr; network policies that block those CDNs prevent transcoding.
+Upload the contents of this folder to any static HTTPS host such as GitHub Pages. Serve `index.html` at the site root. No build step, Node, native software, account, API key or backend is needed by the end user. The first use requires Internet access to retrieve the pinned FFmpeg engine from cdnjs and jsDelivr; network policies that block those CDNs prevent transcoding. The `video-worker.js` loader is hosted alongside `app.mjs` on the same origin (including the repository subpath on GitHub Pages); its native classic-worker/ESM import avoids the upstream bundled worker `blob:` module resolution error. Do not remove `video-worker.js` from deployment.
 
 **Do not open via `file://`**: browsers restrict workers on local file origins. Publish on HTTPS.
 
@@ -26,3 +26,11 @@ Upload the contents of this folder to any static HTTPS host such as GitHub Pages
 Developer unit tests and source examples are included under `tests/`. End users do not need to run commands or install anything.
 
 Browser tests must run in a served HTTPS or localhost origin with engine CDN access. Native FFmpeg can validate command construction and compressed-file behavior, but is not proof that WebAssembly FFmpeg is working in a deployed browser.
+
+## Worker-loader fix (2026-10-20)
+
+- Hosted `video-worker.js` replaces the Webpack-generated `814.ffmpeg` class worker. It speaks FFmpeg.wasm's v0.12 message protocol and supports the main workflow's file, encode and event operations.
+- UMD core is loaded with native `importScripts` in classic workers; ESM core uses native dynamic import in module workers. Pinned FFmpeg.wasm versions are unchanged.
+- New unit tests mock both worker execution paths; this **is not** a verified end-to-end WASM encode on GitHub Pages.
+- `app.mjs?v=2` in `index.html` prompts browsers to fetch the updated loader instead of reusing a cached script.
+- To test the deployment, compress a real sample in a modern browser, play the output with audio, download it and confirm file size and full playback.
