@@ -1,5 +1,6 @@
-import { MB, MAX_INPUT_BYTES, MAX_TARGET_MB, formatBytes, formatTime, parseDuration, parseVideoInfo, makePlan, parseAudioInfo, parseAudioTracks, parseOutputStreams, fastArgs, safeDownloadName, shouldRetry, retryBitrate, validateMp4 } from './codec.mjs';
+import { MB, MAX_INPUT_BYTES, MAX_TARGET_MB, formatBytes, formatTime, parseDuration, parseVideoInfo, makePlan, parseAudioInfo, parseAudioTracks, fastArgs, safeDownloadName, shouldRetry, retryBitrate, validateMp4 } from './codec.mjs';
 import { makeZip, MAX_BATCH_ZIP_BYTES } from './zip.mjs';
+import { parseProbeReport } from './probe.mjs';
 
 const WRAPPER_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/ffmpeg/0.12.15/umd';
 const CORE_CDN = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
@@ -237,15 +238,69 @@ async function ensureEngine(token){
 }
 async function safeDelete(ffmpeg,name){try{await ffmpeg.deleteFile(name);}catch{}}
 function virtualName(item){const ext=item.file.name.match(/\.([a-z0-9]{2,6})$/i)?.[1]?.toLowerCase()||'mp4';return `input.${ext}`;}
+/** Read metadata from ffprobe's output file, not asynchronously delivered log lines.
+ * The old `ffmpeg -i input` log-only check falsely rejected ordinary MP4 videos.
+ */
+async function inspectStreams(ffmpeg,filename,token){
+  const infoFile='stream-info.json';
+  await safeDelete(ffmpeg,infoFile);
+  try {
+    const args=['-v','error','-show_entries',
+      'format=duration:stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,bit_rate,duration',
+      '-of','json',filename,'-o',infoFile];
+    const code=await ffmpeg.ffprobe(args);
+    if(token!==state.token)throw new Error('Canceled.');
+    if(code!==0)throw new Error('FFprobe returned a nonzero result.');
+    const data=await ffmpeg.readFile(infoFile);
+    if(token!==state.token)throw new Error('Canceled.');
+    return parseProbeReport(typeof data==='string'?data:new TextDecoder().decode(data));
+  } finally {await safeDelete(ffmpeg,infoFile);}
+}
+async function fallbackSourceProbe(ffmpeg,input,item,token){
+  // ffprobe may be unavailable in an older/corporate-restricted WebAssembly core.
+  // An actual decoded video frame, not a log substring, decides whether video exists.
+  state.log='';
+  const code=await ffmpeg.exec(['-hide_banner','-loglevel','info','-i',input,
+    '-map','0:v:0','-frames:v','1','-an','-f','null','/dev/null']);
+  if(token!==state.token)throw new Error('Canceled.');
+  if(code!==0)throw new Error('The video stream could not be opened or decoded.');
+  const log=state.log;
+  const meta=parseVideoInfo(log);
+  const duration=parseDuration(log);
+  if(!Number.isFinite(item.duration)||item.duration<=0)item.duration=duration;
+  item.width ||=meta.width;item.height ||=meta.height;item.fps ||=meta.fps;
+  const tracks=parseAudioTracks(log);
+  if(tracks.length){item.audioTracks=tracks;item.sourceAudio=tracks[0];item.audioPresent=true;}
+  else {
+    // No metadata logs? Do not silently remove audio. Probe individual audio
+    // streams by their command exit status, including the common two-track case.
+    item.audioTracks=[];
+    for(let i=0;i<8;i++){
+      const present=await ffmpeg.exec(['-v','error','-i',input,'-map',`0:a:${i}`,
+        '-frames:a','1','-vn','-f','null','/dev/null']);
+      if(token!==state.token)throw new Error('Canceled.');
+      if(present!==0)break;
+      item.audioTracks.push({codec:'',kbps:0});
+    }
+    if(item.audioTracks.length===8)throw new Error('Too many audio tracks to verify safely without FFprobe.');
+    item.audioPresent=item.audioTracks.length>0;
+    item.sourceAudio=item.audioTracks[0]||{codec:'',kbps:0};
+  }
+  if(!Number.isFinite(item.duration)||item.duration<=0)
+    throw new Error('Could not read the video duration. Try a standard MP4 source.');
+}
 async function probeDetails(ffmpeg,input,item,token){
-  state.log='';await ffmpeg.exec(['-hide_banner','-i',input]);if(token!==state.token)throw new Error('Canceled.');
-  const meta=parseVideoInfo(state.log);
-  if(!Number.isFinite(item.duration)||item.duration<=0)item.duration=parseDuration(state.log);
-  item.width ||= meta.width;item.height ||=meta.height;item.fps=meta.fps;
-  item.audioTracks=parseAudioTracks(state.log);
-  item.sourceAudio=parseAudioInfo(state.log);item.audioPresent=item.audioTracks.length>0;
-  if(!/Stream #.*Video:/.test(state.log))throw new Error('No valid video stream found.');
-  if(!Number.isFinite(item.duration)||item.duration<=0)throw new Error('Video duration could not be determined.');
+  let report=null;
+  try{report=await inspectStreams(ffmpeg,input,token);}
+  catch(e){if(token!==state.token)throw e;}
+  if(report){
+    if(Number.isFinite(report.duration))item.duration=report.duration;
+    item.width ||=report.width;item.height ||=report.height;item.fps=report.fps;
+    item.audioTracks=report.audioTracks;item.sourceAudio=report.audioTracks[0]||{codec:'',kbps:0};
+    item.audioPresent=report.audioTracks.length>0;
+    if(!Number.isFinite(item.duration)||item.duration<=0)
+      throw new Error('Could not determine the video duration.');
+  }else await fallbackSourceProbe(ffmpeg,input,item,token);
 }
 async function encode(ffmpeg,args,token,phase){
   if(token!==state.token)throw new Error('Canceled.');
@@ -256,25 +311,37 @@ async function encode(ffmpeg,args,token,phase){
     throw new Error(`Encoding failed.${hint?' '+hint.slice(0,240):' Unsupported format or codec.'}`);}
   activeProgress(phase.to,phase.label);
 }
-async function verifyMedia(ffmpeg, virtualOutput, item, token) {
-  // Structural MP4 boxes alone do not prove there is decodable video.
-  state.log='';
-  await ffmpeg.exec(['-hide_banner','-i',virtualOutput]);
-  if(token!==state.token)throw new Error('Canceled.');
-  const streams=parseOutputStreams(state.log);
-  if(streams.videoCount!==1 || streams.videoCodec!=='h264')throw new Error('Output failed verification: a valid H.264 video stream was not found.');
+async function verifyMedia(ffmpeg,virtualOutput,item,token){
   const originalCount=item.audioTracks?.length ?? (item.audioPresent?1:0);
-  if(streams.audioCount!==originalCount || streams.audioCodecs.some(x=>x!=='aac'))throw new Error(`Output failed verification: expected ${originalCount} AAC audio track(s), found ${streams.audioCount}.`);
-  const sample=['-v','error','-xerror','-i',virtualOutput,'-map','0:v:0','-map','0:a?','-t','0.5','-f','null','/dev/null'];
+  let report=null;
+  try{report=await inspectStreams(ffmpeg,virtualOutput,token);}
+  catch(e){if(token!==state.token)throw e;}
+  if(report){
+    if(report.videoCount!==1||report.videoCodec!=='h264')
+      throw new Error('Output failed verification: expected one H.264 video stream.');
+    if(report.audioTracks.length!==originalCount||report.audioTracks.some(x=>x.codec!=='aac'))
+      throw new Error(`Output failed verification: expected ${originalCount} AAC audio track(s), found ${report.audioTracks.length}.`);
+  }
+  // A correctly mapped stream must decode; logging delays are not failures.
+  const sample=['-v','error','-xerror','-i',virtualOutput,'-map','0:v:0','-map','0:a?',
+    '-t','0.5','-f','null','/dev/null'];
   if(await ffmpeg.exec(sample)!==0)throw new Error('Output failed verification: video or audio could not be decoded.');
   if(token!==state.token)throw new Error('Canceled.');
-  // Validate a short sample near the end without decoding the entire recording.
   if(item.duration>3){
-    const end=Math.max(0,(item.duration-0.8)).toFixed(2);
-    if(await ffmpeg.exec(['-v','error','-xerror','-ss',end,'-i',virtualOutput,'-map','0:v:0','-map','0:a?','-t','0.5','-f','null','/dev/null'])!==0)
+    const end=Math.max(0,item.duration-0.8).toFixed(2);
+    if(await ffmpeg.exec(['-v','error','-xerror','-ss',end,'-i',virtualOutput,'-map','0:v:0',
+      '-map','0:a?','-t','0.5','-f','null','/dev/null'])!==0)
       throw new Error('Output failed verification: media could not be decoded near the end.');
   }
   if(token!==state.token)throw new Error('Canceled.');
+  // If ffprobe cannot run, explicitly confirm every expected audio stream exists.
+  if(!report){
+    for(let i=0;i<originalCount;i++){
+      if(await ffmpeg.exec(['-v','error','-i',virtualOutput,'-map',`0:a:${i}`,
+        '-frames:a','1','-vn','-f','null','/dev/null'])!==0)
+        throw new Error(`Output failed verification: audio track ${i+1} is missing or unreadable.`);
+    }
+  }
 }
 async function compressOne(item,token,index,total){
   const input=virtualName(item),output='compressed.mp4';let ffmpeg;
@@ -317,7 +384,7 @@ async function compressOne(item,token,index,total){
     item.encodedTargetMB=selectedTarget;item.recompress=false;
     item.note=blob.size>plan.targetBytes
       ? 'The output is above your requested size after retry. Try a larger target. Preview to check playback.'
-      : 'MP4 and media samples validated. Preview to check picture, audio, and seeking.';
+      : 'MP4 and sampled media verified. Preview to check picture, audio, and seeking.';
     activeProgress(100,`Video ${index} of ${total} · Complete`);
   }catch(e){
     const message=e instanceof Error?e.message:String(e);
