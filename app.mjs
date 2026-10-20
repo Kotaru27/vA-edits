@@ -10,7 +10,7 @@ const MAX_BATCH_BYTES = 900 * MB;
 const $ = id => document.getElementById(id);
 const els = {
   input:$('fileInput'), drop:$('dropzone'), target:$('targetSize'), button:$('compressButton'),
-  actionLabel:$('actionLabel'), error:$('errorBox'), insight:$('planInsight'), outlook:$('qualityOutlook'),
+  actionLabel:$('actionLabel'), error:$('errorBox'),
   progress:$('progressBlock'), progressFill:$('progressFill'), progressValue:$('progressValue'),
   progressTrack:$('progressTrack'), status:$('statusText'), cancel:$('cancelButton'),
   list:$('batchList'), empty:$('emptyState'), count:$('batchCount'), footer:$('batchFooter'),
@@ -87,7 +87,9 @@ function renderQueue() {
     const mobileSize=document.createElement('span');mobileSize.className='mobile-sizes';
     mobileSize.textContent=` · ${formatBytes(item.file.size)}${item.status==='done'?` → ${formatBytes(item.resultBytes)}`:''}`;
     meta.append(mobileSize);
-    copy.append(name,meta);file.append(num,copy);
+    const quality=document.createElement('p');quality.className='item-quality';quality.id=`row-quality-${item.id}`;
+    populateQuality(quality,item);
+    copy.append(name,meta,quality);file.append(num,copy);
     const inputBytes=document.createElement('div');inputBytes.className='item-size source-size';inputBytes.textContent=formatBytes(item.file.size);
     const outputBytes=document.createElement('div');outputBytes.className='item-size result-size';
     outputBytes.textContent=item.status==='done'?formatBytes(item.resultBytes):'—';
@@ -144,7 +146,7 @@ function addFiles(files) {
     if(seen.has(key))continue;
     seen.add(key);sum+=file.size;
     const item={id:state.nextId++,file,status:'queued',duration:NaN,width:0,height:0,fps:0,
-      audioPresent:false,sourceAudio:null,outputURL:'',outputBlob:null,resultBytes:0,note:'',percent:0};
+      audioPresent:true,sourceAudio:null,outputURL:'',outputBlob:null,resultBytes:0,note:'',percent:0};
     state.items.push(item);probeBrowserMetadata(item);
   }
   renderQueue();updateOutlook();
@@ -161,18 +163,27 @@ function probeBrowserMetadata(item) {
   };
   video.onerror=finish;video.src=url;
 }
+function qualityOutlook(item) {
+  if(!validTarget())return null;
+  if(item.file.size<=targetMB()*MB)return {tone:'critical',message:'Target must be smaller than this video.'};
+  if(!Number.isFinite(item.duration)||item.duration<=0)return {tone:'pending',message:'Reading video details for the quality estimate…'};
+  try {
+    const plan=makePlan({duration:item.duration,targetMB:targetMB(),originalBytes:item.file.size,width:item.width,height:item.height,fps:item.fps,audioPresent:item.audioPresent,sourceAudio:item.sourceAudio});
+    const tone=/very aggressive|visible quality loss/i.test(plan.warning)?'critical':/soften/i.test(plan.warning)?'warning':'normal';
+    return {tone,message:plan.warning};
+  }catch(e){return {tone:'critical',message:e instanceof Error?e.message:String(e)};}
+}
+function populateQuality(node,item) {
+  const quality=qualityOutlook(item);
+  node.hidden=!quality;
+  if(!quality){node.replaceChildren();return;}
+  node.dataset.tone=quality.tone;
+  const label=document.createElement('strong');label.className='quality-label';label.textContent='Quality outlook';
+  node.replaceChildren(label,document.createTextNode(' · '+quality.message));
+}
 function updateOutlook() {
-  els.insight.hidden=true;if(!state.items.length||!validTarget()) return;
-  const warnings=[];
-  for(const item of state.items) {
-    if(item.file.size<=targetMB()*MB) {warnings.push(`${item.file.name}: target must be smaller than original.`);continue;}
-    if(Number.isFinite(item.duration)&&item.duration>0){
-      try{const p=makePlan({duration:item.duration,targetMB:targetMB(),originalBytes:item.file.size,width:item.width,height:item.height,fps:item.fps});
-        if(/loss|soften/i.test(p.warning))warnings.push(`${item.file.name}: ${p.warning}`);
-      }catch(e){warnings.push(`${item.file.name}: ${e.message}`);}
-    }
-  }
-  if(warnings.length){els.insight.hidden=false;els.outlook.textContent=warnings.slice(0,2).join(' ')+(warnings.length>2?' More videos may need a higher target.':'');}
+  // Each file owns its estimate. Never combine unrelated filename/warning strings in a header.
+  for(const item of state.items){const node=$(`row-quality-${item.id}`);if(node)populateQuality(node,item);}
 }
 async function urlToBlobURL(url,mime){const res=await fetch(url);if(!res.ok)throw new Error(`Unable to fetch encoder (${res.status}).`);return URL.createObjectURL(new Blob([await res.blob()],{type:mime}));}
 function loadScript(url){return new Promise((resolve,reject)=>{if(window.FFmpegWASM?.FFmpeg)return resolve();const script=document.createElement('script');script.src=url;script.onload=resolve;script.onerror=()=>reject(new Error('Unable to load video engine. Check CDN/network access.'));document.head.append(script);});}
@@ -236,6 +247,7 @@ async function compressOne(item,token,index,total){
     if(token!==state.token)throw new Error('Canceled.');
     activeProgress(9,`Video ${index} of ${total} · Inspecting streams…`);
     await probeDetails(ffmpeg,input,item,token);
+    updateOutlook();
     const plan=makePlan({duration:item.duration,targetMB:targetMB(),originalBytes:item.file.size,width:item.width,height:item.height,fps:item.fps,audioPresent:item.audioPresent,sourceAudio:item.sourceAudio});
     let kbps=plan.videoKbps;let data;
     for(let attempt=1;attempt<=2;attempt++){
