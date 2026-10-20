@@ -33,3 +33,16 @@ Serve `index.html`, `app.mjs`, `codec.mjs`, `zip.mjs`, `styles.css`, `video-work
 ## Desktop workspace
 
 The v3 layout uses the full available browser width rather than a centered 1300px container. Controls stay in a narrow left column; a five-column file queue fills the right with video, original size, compressed size, status and actions. Below 1380px the queue condenses; below 1060px the settings stack above it. The preview remains opt-in.
+
+## v4 queue controls and visual progress
+
+The per-video target defaults to **8 MB**. Target entry, Compress and Cancel are
+in the queue header on desktop, making the primary operation accessible without
+scrolling back to the upload panel. While the number field has focus, wheel/trackpad
+events do not change its value; typing and native Up/Down arrows still work.
+
+The active queue row fills from left to right with a green progress background,
+driven by the percentages reported by the running encoder rather than a simulated
+timer. Progress values may pause during engine loading, file I/O or heavy encoding;
+the display never treats visual progress as proof of a completed or playable file.
+On completion or cancellation the working-row fill disappears.

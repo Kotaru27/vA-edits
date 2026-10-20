@@ -26,3 +26,33 @@ button:focus-visible,input:focus-visible,.dropzone:focus-visible,a:focus-visible
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 
 @media(min-width:1800px){.batch-panel{min-height:650px}.batch-list{gap:11px;padding:18px 22px}.batch-item{padding:21px 18px}.item-name{font-size:15px}.item-size,.item-status{font-size:13px}.item-meta,.item-note{font-size:12px}.item-actions button,.item-actions a{font-size:12px;padding:10px 13px}.queue-heading{font-size:27px}.batch-columns{font-size:11px}.field-help{font-size:13px}.panel-head h2{font-size:16px}.upload-title{font-size:15px}}
+
+/* v4: queue-first controls with a non-intrusive progress sweep. */
+.preview-top{display:grid;grid-template-columns:max-content minmax(0,1fr);align-items:center;justify-content:start;gap:clamp(25px,3vw,68px);padding-block:22px}
+.queue-headline{min-width:0}
+.queue-info{max-width:none;text-align:left;margin:9px 0 0;color:#888697;font-size:11px}
+.queue-control-stack{min-width:0;max-width:770px;width:100%}
+.queue-controls{display:flex;align-items:flex-end;gap:11px;min-width:0}
+.queue-size-field{flex:0 0 145px;min-width:120px}
+.queue-size-field .field-label{font-size:11px;white-space:nowrap;margin:0 0 7px;color:#656075}
+.queue-size-field .number-wrap{height:44px;border-radius:9px}
+.queue-size-field .number-wrap input{font-size:17px;padding-inline:12px}
+.queue-size-field .number-wrap>span{padding:0 11px}
+.queue-controls .primary-action{flex:0 1 208px;min-width:154px;height:44px;margin:0}
+.queue-controls .primary-action .action-arrow{right:13px;font-size:19px}
+.queue-controls .cancel-batch{flex:none;min-height:44px;border:1px solid #ddd8e9;border-radius:9px;background:#fff;color:#61556e;font-size:12px;font-weight:710;padding:0 17px}
+.queue-controls .cancel-batch:hover:not(:disabled){background:#f8f6fe}
+.queue-control-stack .plan-insight{margin-top:10px}
+.queue-progress{max-width:510px;margin-top:12px}
+.queue-progress .progress-line{margin-bottom:6px}
+.queue-progress .progress-track{height:5px}
+.batch-item{position:relative;isolation:isolate;overflow:hidden}
+.batch-item.is-working{background:#f9fefb;border-color:#a1dbbc}
+.batch-item.is-working>.row-progress-fill{position:absolute;inset:0;width:100%;height:100%;z-index:0;pointer-events:none;background:linear-gradient(90deg,#baf0d2 0%,#85e2b2 100%);transform-origin:left center;transition:transform .24s cubic-bezier(.22,.7,.25,1);will-change:transform}
+.batch-item.is-working>*:not(.row-progress-fill){position:relative;z-index:1}
+.batch-item.is-working .item-status.active{color:#125d41}
+@media(max-width:1450px){.preview-top{gap:18px}.queue-control-stack{max-width:630px}.queue-heading{font-size:24px}.queue-info{margin-top:5px}}
+@media(max-width:1060px){.preview-top{grid-template-columns:max-content minmax(0,1fr)}.queue-controls .primary-action{min-width:145px}}
+@media(max-width:750px){.preview-top{grid-template-columns:1fr;gap:15px}.queue-control-stack{max-width:100%}.queue-controls{flex-wrap:wrap}}
+@media(max-width:430px){.queue-size-field{flex:0 0 128px}.queue-controls .primary-action{flex:1 1 180px}.queue-controls .cancel-batch{flex:1 1 100%}}
+@media(prefers-reduced-motion:reduce){.batch-item.is-working>.row-progress-fill{transition:none}}
