@@ -1,4 +1,4 @@
-import { MB, MAX_INPUT_BYTES, MAX_TARGET_MB, formatBytes, formatTime, parseDuration, parseVideoInfo, makePlan, parseAudioInfo, fastArgs, safeDownloadName, shouldRetry, retryBitrate } from './codec.mjs';
+import { MB, MAX_INPUT_BYTES, MAX_TARGET_MB, formatBytes, formatTime, parseDuration, parseVideoInfo, makePlan, parseAudioInfo, fastArgs, safeDownloadName, shouldRetry, retryBitrate, validateMp4 } from './codec.mjs';
 import { makeZip, MAX_BATCH_ZIP_BYTES } from './zip.mjs';
 
 const WRAPPER_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/ffmpeg/0.12.15/umd';
@@ -66,33 +66,39 @@ function renderQueue() {
   for(let i=0;i<state.items.length;i++) {
     const item=state.items[i]; if(item.status==='done') completed++;
     const row=document.createElement('article'); row.className=`batch-item ${item.status==='working'?'is-working':''}`;
-    const head=document.createElement('div'); head.className='item-head';
+    const file=document.createElement('div'); file.className='item-file';
     const num=document.createElement('div'); num.className='item-number'; num.textContent=String(i+1).padStart(2,'0');
     const copy=document.createElement('div'); copy.className='item-copy';
-    const name=document.createElement('div'); name.className='item-name'; name.textContent=item.file.name;
+    const name=document.createElement('div'); name.className='item-name'; name.textContent=item.file.name;name.title=item.file.name;
     const meta=document.createElement('div'); meta.className='item-meta';
-    const info=[formatBytes(item.file.size)];
+    const info=[];
     if(Number.isFinite(item.duration) && item.duration>0) info.push(formatTime(item.duration));
-    if(item.status==='done') info.push(`${formatBytes(item.resultBytes)} compressed`);
-    meta.textContent=info.join(' · ');
-    copy.append(name,meta);
+    if(item.status==='done') info.push(`${Math.max(0,Math.round((1-item.resultBytes/item.file.size)*100))}% smaller`);
+    meta.textContent=info.join(' · ')||'Video file';
+    const mobileSize=document.createElement('span');mobileSize.className='mobile-sizes';
+    mobileSize.textContent=` · ${formatBytes(item.file.size)}${item.status==='done'?` → ${formatBytes(item.resultBytes)}`:''}`;
+    meta.append(mobileSize);
+    copy.append(name,meta);file.append(num,copy);
+    const inputBytes=document.createElement('div');inputBytes.className='item-size source-size';inputBytes.textContent=formatBytes(item.file.size);
+    const outputBytes=document.createElement('div');outputBytes.className='item-size result-size';
+    outputBytes.textContent=item.status==='done'?formatBytes(item.resultBytes):'—';
     const status=document.createElement('span'); status.className='item-status';
-    const labels={queued:'Ready',working:'Compressing',done:'Ready to download',failed:'Failed',canceled:'Canceled'};
+    const labels={queued:'Queued',working:'Compressing',done:'Completed',failed:'Failed',canceled:'Canceled'};
     status.textContent=item.status==='working' ? `${item.percent||0}%` : labels[item.status];
     if(item.status==='working'){status.id=`row-progress-${item.id}`;status.classList.add('active');}
     if(item.status==='done') status.classList.add('ok');
     if(item.status==='failed') status.classList.add('error');
-    head.append(num,copy,status); row.append(head);
     const actions=document.createElement('div');actions.className='item-actions';
-    const preview=document.createElement('button'); preview.type='button'; preview.textContent='Preview';
+    const preview=document.createElement('button');preview.type='button';preview.textContent='Preview';
     preview.disabled=state.busy || state.zipBusy;preview.addEventListener('click',()=>openPreview(item.id));actions.append(preview);
     if(item.status==='done' && item.outputURL){
-      const a=document.createElement('a'); a.href=item.outputURL; a.download=safeDownloadName(item.file.name);
-      a.textContent='Download MP4 ↓'; a.className='download-one'; actions.append(a);
+      const a=document.createElement('a');a.href=item.outputURL;a.download=safeDownloadName(item.file.name);
+      a.textContent='Download ↓';a.className='download-one';actions.append(a);
     }
-    const remove=document.createElement('button'); remove.type='button'; remove.className='remove-item';
-    remove.textContent='Remove'; remove.disabled=state.busy || state.zipBusy;
-    remove.addEventListener('click',()=>removeItem(item.id)); actions.append(remove);row.append(actions);
+    const remove=document.createElement('button');remove.type='button';remove.className='remove-item';
+    remove.textContent='Remove';remove.disabled=state.busy || state.zipBusy;
+    remove.addEventListener('click',()=>removeItem(item.id));actions.append(remove);
+    row.append(file,inputBytes,outputBytes,status,actions);
     if(item.note){const note=document.createElement('p');note.className=`item-note ${item.status==='failed'?'error':''}`;note.textContent=item.note;row.append(note);}
     frag.append(row);
   }
@@ -209,17 +215,6 @@ async function encode(ffmpeg,args,token,phase){
     throw new Error(`Encoding failed.${hint?' '+hint.slice(0,240):' Unsupported format or codec.'}`);}
   activeProgress(phase.to,phase.label);
 }
-async function checkBrowserPlayback(url){
-  const player=document.createElement('video');player.muted=true;player.playsInline=true;player.preload='auto';
-  return new Promise((resolve,reject)=>{
-    let finished=false;
-    const done=e=>{if(finished)return;finished=true;clearTimeout(timer);player.pause();player.removeAttribute('src');player.load();e?reject(e):resolve();};
-    const timer=setTimeout(()=>done(new Error('Browser could not verify MP4 playback in time.')),15000);
-    player.onerror=()=>done(new Error('Browser cannot decode the resulting MP4.'));
-    player.onloadeddata=()=>done(null);player.src=url;player.load();
-    if(player.readyState>=2)done(null);
-  });
-}
 async function compressOne(item,token,index,total){
   const input=virtualName(item),output='compressed.mp4';let ffmpeg;
   item.status='working';item.note='';item.percent=0;state.active=item;state.progressValue=-1;renderQueue();
@@ -239,19 +234,23 @@ async function compressOne(item,token,index,total){
       const phase=attempt===1?{from:12,to:89,label:`Video ${index} of ${total} · Fast encoding…`}:{from:89,to:97,label:`Video ${index} of ${total} · Adjusting file size…`};
       await encode(ffmpeg,fastArgs({input,output,videoKbps:kbps,audioKbps:plan.audioKbps,audioPresent:item.audioPresent,copyAudio:plan.copyAudio}),token,phase);
       data=await ffmpeg.readFile(output);
-      if(!(data instanceof Uint8Array)||data.length<12||String.fromCharCode(...data.subarray(4,8))!=='ftyp')throw new Error('Encoder did not produce a valid MP4 container.');
+      validateMp4(data);
       if(!shouldRetry(data.length,plan.targetBytes,attempt))break;
       const retry=retryBitrate(kbps,plan.targetBytes,data.length);
       if(retry<70||retry>=kbps)break;
       kbps=retry;
     }
-    activeProgress(97,`Video ${index} of ${total} · Checking playback…`);
+    activeProgress(97,`Video ${index} of ${total} · Finalizing MP4…`);
+    // Browser media decoding may be slow under WASM memory pressure. It must not
+    // destroy an otherwise complete MP4 or incorrectly label encoding as failed.
+    // Playback is available on demand through the Preview button.
+    if(token!==state.token)throw new Error('Canceled.');
     const blob=new Blob([data],{type:'video/mp4'});
     const url=URL.createObjectURL(blob);
-    try{await checkBrowserPlayback(url);}catch(e){URL.revokeObjectURL(url);throw e;}
-    if(token!==state.token){URL.revokeObjectURL(url);throw new Error('Canceled.');}
     item.outputBlob=blob;item.outputURL=url;item.resultBytes=blob.size;item.status='done';item.percent=100;
-    item.note=blob.size>plan.targetBytes?'Output is above your requested size despite a retry. Try a larger target or a different video.':'MP4 container and browser playback startup verified.';
+    item.note=blob.size>plan.targetBytes
+      ? 'The output is above your requested size after retry. Try a larger target. Preview to check playback.'
+      : 'Saved as MP4. Preview if you want to check picture, audio, and seeking.';
     activeProgress(100,`Video ${index} of ${total} · Complete`);
   }catch(e){
     item.status=state.cancelRequested?'canceled':'failed';item.note=e instanceof Error?e.message:String(e);
@@ -334,6 +333,7 @@ window.addEventListener('dragover',e=>e.preventDefault());window.addEventListene
 els.originalTab.addEventListener('click',()=>setPreviewMode('original'));
 els.outputTab.addEventListener('click',()=>setPreviewMode('output'));
 els.close.addEventListener('click',()=>els.dialog.close());els.dialog.addEventListener('close',closePreview);
+els.video.addEventListener('error',()=>{if(state.previewItem)els.previewHelp.textContent='This browser could not open this video preview. The downloaded file is still available; check it in your preferred player.';});
 els.downloadAll.addEventListener('click',downloadAll);
 window.addEventListener('beforeunload',()=>{closePreview();for(const item of state.items)releaseOutput(item);terminateEngine();});
 renderQueue();

@@ -5,7 +5,7 @@
   <meta name="theme-color" content="#f8f7f4">
   <title>Video Compressor — Compress with care</title>
   <meta name="description" content="Compress several videos to a chosen target size, privately in your browser.">
-  <link rel="stylesheet" href="./styles.css?v=3">
+  <link rel="stylesheet" href="./styles.css?v=4">
 </head>
 <body>
   <header class="site-header"><div class="brand"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>compress<span class="brand-dot">.</span></div><div class="header-right"><span class="local-tag"><span class="local-indicator"></span>On-device processing</span></div></header>
@@ -32,7 +32,8 @@
         <div class="error-box" id="errorBox" hidden role="alert"></div>
       </section>
       <section class="preview-panel batch-panel" aria-label="Compression queue">
-        <div class="preview-top"><span class="preview-title">YOUR VIDEOS</span><span id="batchCount" class="batch-counter">0 selected</span></div>
+        <div class="preview-top"><div><span class="eyebrow queue-eyebrow">YOUR WORKSPACE</span><h2 class="queue-heading">Video queue <span id="batchCount" class="batch-counter">0 selected</span></h2></div><span class="queue-info">Processed one at a time · MP4 output</span></div>
+        <div class="batch-columns" aria-hidden="true"><span>VIDEO</span><span>ORIGINAL</span><span>COMPRESSED</span><span>STATUS</span><span>ACTIONS</span></div>
         <div id="emptyState" class="batch-empty"><div class="batch-empty-glyph" aria-hidden="true">▤</div><strong>Ready when you are.</strong><span>Your selected videos will appear here. Previews open only when you choose to watch.</span></div>
         <div id="batchList" class="batch-list" aria-live="polite"></div>
         <div class="batch-footer" id="batchFooter" hidden><span id="batchSummary" class="batch-summary"></span><button type="button" id="downloadAll" class="download-all" hidden>Download all as ZIP <span aria-hidden="true">↓</span></button></div>
@@ -45,6 +46,6 @@
     <div class="dialog-tabs"><button type="button" id="originalTab" aria-pressed="true" class="preview-tab active">Original</button><button type="button" id="outputTab" aria-pressed="false" class="preview-tab">Compressed</button></div>
     <video id="previewVideo" controls playsinline preload="metadata"></video><p id="previewHelp" class="dialog-help">Click play to preview the video.</p>
   </dialog>
-  <script type="module" src="./app.mjs?v=3"></script>
+  <script type="module" src="./app.mjs?v=4"></script>
 </body>
 </html>
