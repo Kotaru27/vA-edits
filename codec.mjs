@@ -32,35 +32,50 @@ export function parseVideoInfo(logText) {
   return {width: dims ? Number(dims[1]) : 0, height: dims ? Number(dims[2]) : 0, fps: fpsMatch ? Number(fpsMatch[1]) : 0};
 }
 
-export function parseAudioInfo(logText) {
-  const line = logText.split('\n').find(s => /Stream #.*Audio:/.test(s)) || '';
-  const codec = line.match(/Audio:\s*([a-z0-9_-]+)/i)?.[1]?.toLowerCase() || '';
-  const rate = line.match(/(\d+(?:\.\d+)?)\s*kb\/s/);
-  return {codec, kbps: rate ? Number(rate[1]) : 0};
+export function parseAudioTracks(logText) {
+  return logText.split('\n').filter(line => /Stream #\d+:\d+[^:\n]*: Audio:/.test(line)).map(line => {
+    const codec = line.match(/Audio:\s*([a-z0-9_-]+)/i)?.[1]?.toLowerCase() || '';
+    const rate = line.match(/(\d+(?:\.\d+)?)\s*kb\/s/);
+    return {codec, kbps: rate ? Number(rate[1]) : 0};
+  });
 }
 
-export function makePlan({duration, targetMB, originalBytes, width = 0, height = 0, fps = 0, audioPresent = true, sourceAudio = null}) {
+export function parseAudioInfo(logText) {
+  return parseAudioTracks(logText)[0] || {codec:'', kbps:0};
+}
+
+export function parseOutputStreams(logText) {
+  const lines = logText.split('\n');
+  const video = lines.filter(line => /Stream #\d+:\d+[^:\n]*: Video:/.test(line));
+  const audio = parseAudioTracks(logText);
+  return {videoCount:video.length, videoCodec:video[0]?.match(/Video:\s*([a-z0-9_-]+)/i)?.[1]?.toLowerCase()||'', audioCount:audio.length, audioCodecs:audio.map(a=>a.codec)};
+}
+
+/** All source audio tracks are retained. Each AAC bitrate consumes part of the size budget. */
+export function makePlan({duration, targetMB, originalBytes, width=0, height=0, fps=0, audioPresent=true, sourceAudio=null, audioTracks=null}) {
   if (!Number.isFinite(duration) || duration <= 0) throw new Error('Could not determine the video duration.');
   if (!Number.isFinite(targetMB) || targetMB < 0.1 || targetMB > MAX_TARGET_MB) throw new Error('Enter a target between 0.1 and 1024 MB.');
-  const targetBytes = Math.floor(targetMB * MB);
-  if (Number.isFinite(originalBytes) && targetBytes >= originalBytes) {
-    throw new Error('The target must be smaller than the original file.');
-  }
-  // Keep buffer for MP4 metadata, audio bit rate variance, and encoder/muxer overhead.
-  const totalBps = Math.floor(targetBytes * 8 / duration);
-  const audioKbps = !audioPresent ? 0 : totalBps >= 1800000 ? 192 : totalBps >= 750000 ? 160 : totalBps >= 390000 ? 128 : totalBps >= 235000 ? 96 : 64;
-  const copyAudio = audioPresent && sourceAudio?.codec === 'aac' && Number.isFinite(sourceAudio.kbps)
-    && sourceAudio.kbps > 0 && sourceAudio.kbps <= audioKbps;
-  const budgetAudioKbps = copyAudio ? sourceAudio.kbps : audioKbps;
-  const videoKbps = Math.floor((totalBps * 0.955 - budgetAudioKbps * 1000) / 1000);
-  if (videoKbps < 70) throw new Error('Target is too small for this video’s length and usable picture/audio quality. Increase the target size.');
-  const bpp = width && height ? (videoKbps * 1000)/(width * height * (fps || 30)) : null;
-  const warning = (bpp !== null && bpp < 0.04) || videoKbps < 320
-    ? 'This target is very aggressive; visible quality loss is likely.'
-    : (bpp !== null && bpp < 0.07)
-      ? 'Fine details may soften at this target size.'
-      : 'Resolution and frame timing will be preserved.';
-  return {targetBytes, totalBps, audioKbps:budgetAudioKbps, copyAudio, videoKbps, bpp, warning};
+  const targetBytes=Math.floor(targetMB*MB);
+  if (Number.isFinite(originalBytes) && targetBytes >= originalBytes) throw new Error('The target must be smaller than the original file.');
+  const totalBps=Math.floor(targetBytes*8/duration);
+  const tracks=!audioPresent?[]:(Array.isArray(audioTracks)?audioTracks:(sourceAudio?[sourceAudio]:[{codec:'',kbps:0}]));
+  const count=tracks.length;
+  if (count>16) throw new Error('This video has too many audio tracks for reliable browser compression.');
+  const idealAudioKbps=count===0?0:totalBps>=1800000?192:totalBps>=750000?160:totalBps>=390000?128:totalBps>=235000?96:64;
+  const availableKbps=Math.floor(totalBps*0.955/1000)-70;
+  if (count && availableKbps < count*48) throw new Error(`Target too small to retain all ${count} audio track(s) and usable video. Increase the target size.`);
+  const encodeKbps=count?Math.min(idealAudioKbps,Math.floor(availableKbps/count)):0;
+  const copyKbps=tracks.reduce((sum,a)=>sum+(Number.isFinite(a.kbps)?a.kbps:0),0);
+  const copyAudio=!!count && tracks.every(a=>a.codec==='aac'&&Number.isFinite(a.kbps)&&a.kbps>0) && copyKbps <= encodeKbps*count;
+  const audioTotalKbps=copyAudio?copyKbps:encodeKbps*count;
+  const audioKbps=copyAudio?Math.ceil(copyKbps/count):encodeKbps;
+  const videoKbps=Math.floor(totalBps*0.955/1000-audioTotalKbps);
+  if (videoKbps<70) throw new Error('Target is too small for this video’s length and usable picture/audio quality. Increase the target size.');
+  const bpp=width&&height?(videoKbps*1000)/(width*height*(fps||30)):null;
+  const baseWarning=(bpp!==null&&bpp<0.04)||videoKbps<320?'This target is very aggressive; visible quality loss is likely.'
+    :(bpp!==null&&bpp<0.07)?'Fine details may soften at this target size.':'Resolution and frame timing will be preserved.';
+  const warning=count>1?`${baseWarning} All ${count} audio tracks will be retained.`:baseWarning;
+  return {targetBytes,totalBps,audioKbps,audioTotalKbps,audioCount:count,copyAudio,videoKbps,bpp,warning};
 }
 
 export function passArgs({input, output = 'compressed.mp4', videoKbps, audioKbps, pass, audioPresent = true, copyAudio = false}) {
@@ -73,7 +88,7 @@ export function passArgs({input, output = 'compressed.mp4', videoKbps, audioKbps
     '-passlogfile','ratepass','-threads','1'];
   if (pass === 1) return [...args,'-an','-f','null','/dev/null'];
   if (audioPresent) {
-    args.push('-map','0:a:0?','-c:a',copyAudio ? 'copy' : 'aac');
+    args.push('-map','0:a?','-c:a',copyAudio ? 'copy' : 'aac');
     if (!copyAudio) args.push('-b:a',`${audioKbps}k`);
   }
   else args.push('-an');
@@ -112,14 +127,24 @@ export function validateMp4(data) {
   return true;
 }
 
+function stableNameHash(value) {
+  let hash=2166136261;
+  for (const point of value) {const n=point.codePointAt(0);hash=Math.imul(hash^(n&65535),16777619);hash=Math.imul(hash^(n>>>16),16777619);}
+  return (hash>>>0).toString(16).padStart(8,'0');
+}
 export function safeDownloadName(filename) {
-  const original = String(filename ?? '').split(/[\\/]/).pop() || 'video.mp4';
-  const clean = original.replace(/[\x00-\x1f<>:"|?*]/g, '_').trim().replace(/[. ]+$/g, '').slice(0, 180);
-  if (!clean) return 'video.mp4';
-  const match = clean.match(/\.([a-z0-9]{2,8})$/i);
-  if (match && match[1].toLowerCase() === 'mp4') return clean;
-  const stem = match ? clean.slice(0, -match[0].length) : clean;
-  return `${stem || 'video'}.mp4`;
+  const original=String(filename??'').split(/[\\/]/).pop() || 'video.mp4';
+  const cleaned=original.replace(/[\x00-\x1f<>:"|?*]/g,'_').trim().replace(/[. ]+$/g,'')||'video.mp4';
+  const suffix=cleaned.match(/\.([a-z0-9]{2,8})$/i);
+  const ext=suffix?.[1]?.toLowerCase()==='mp4'?suffix[0]:'.mp4';
+  const stem=(suffix?cleaned.slice(0,-suffix[0].length):cleaned)||'video';
+  const candidate=stem+ext;
+  const bytes=new TextEncoder();
+  if(bytes.encode(candidate).length<=230)return candidate;
+  const hash='~'+stableNameHash(cleaned);
+  let prefix='';
+  for(const char of stem){if(bytes.encode(prefix+char+hash+ext).length>230)break;prefix+=char;}
+  return (prefix||'video')+hash+ext;
 }
 
 /** Fast size-aware single-pass H.264 output; retry uses the same path with adjusted bitrate.
@@ -132,7 +157,7 @@ export function fastArgs({input, output = 'compressed.mp4', videoKbps, audioKbps
     '-b:v',`${Math.floor(videoKbps)}k`, '-maxrate',`${Math.ceil(videoKbps * 1.3)}k`,
     '-bufsize',`${Math.ceil(videoKbps * 2)}k`, '-pix_fmt','yuv420p', '-threads','1'];
   if (audioPresent) {
-    args.push('-map','0:a:0?','-c:a',copyAudio ? 'copy' : 'aac');
+    args.push('-map','0:a?','-c:a',copyAudio ? 'copy' : 'aac');
     if (!copyAudio) args.push('-b:a',`${audioKbps}k`);
   } else args.push('-an');
   return [...args,'-movflags','+faststart','-avoid_negative_ts','make_zero',output];
