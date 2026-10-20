@@ -3,9 +3,10 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f8f7f4">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' blob: https://cdnjs.cloudflare.com 'wasm-unsafe-eval'; connect-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; worker-src 'self' blob:; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'none'">
   <title>Video Compressor — Compress with care</title>
   <meta name="description" content="Compress several videos to a chosen target size, privately in your browser.">
-  <link rel="stylesheet" href="./styles.css?v=6">
+  <link rel="stylesheet" href="./styles.css?v=7">
 </head>
 <body>
   <header class="site-header"><div class="brand"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>compress<span class="brand-dot">.</span></div><div class="header-right"><span class="local-tag"><span class="local-indicator"></span>On-device processing</span></div></header>
@@ -18,7 +19,7 @@
           <div class="upload-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0-4 4m4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div>
           <p class="upload-title">Drop your videos here</p><p id="uploadHelp" class="upload-sub">or <span class="choose-text">browse files</span> · multiple files supported</p>
         </div>
-        <p class="field-help">Up to 450 MB per video, 900 MB per batch. Files stay on your device.</p>
+        <p class="field-help">Up to 450 MB per video on capable devices (lower on low-memory devices), 900 MB per batch. Files stay on your device.</p>
         <div class="error-box" id="errorBox" hidden role="alert"></div>
       </section>
       <section class="preview-panel batch-panel" aria-label="Compression queue">
@@ -46,6 +47,6 @@
     <div class="dialog-tabs"><button type="button" id="originalTab" aria-pressed="true" class="preview-tab active">Original</button><button type="button" id="outputTab" aria-pressed="false" class="preview-tab">Compressed</button></div>
     <video id="previewVideo" controls playsinline preload="metadata"></video><p id="previewHelp" class="dialog-help">Click play to preview the video.</p>
   </dialog>
-  <script type="module" src="./app.mjs?v=6"></script>
+  <script type="module" src="./app.mjs?v=7"></script>
 </body>
 </html>

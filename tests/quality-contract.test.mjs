@@ -20,7 +20,8 @@ test('each item owns its quality message with no global quality summary',()=>{
 test('quality estimate updates on browser metadata, FFmpeg metadata and target changes',()=>{
  assert.match(js,/finish\(\);if\(state\.items\.includes\(item\)\)\{renderQueue\(\);updateOutlook\(\);\}/);
  assert.match(js,/await probeDetails\(ffmpeg,input,item,token\);\s*updateOutlook\(\)/);
- assert.match(js,/releaseAll\(\);for\(const item of state\.items\)[^\n]*\n\s*setError\(''\);renderQueue\(\);updateOutlook\(\)/);
+ assert.doesNotMatch(js,/releaseAll\(\);for\(const item of state\.items/);
+ assert.match(js,/setError\(''\);renderQueue\(\);updateOutlook\(\)/);
  assert.match(css,/\.item-quality\[data-tone="critical"\]/);
 });
 test('batch engine, download naming, green progress and 8MB default remain intact',()=>{
