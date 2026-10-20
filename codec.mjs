@@ -80,9 +80,32 @@ export function passArgs({input, output = 'compressed.mp4', videoKbps, audioKbps
   return [...args,'-movflags','+faststart','-avoid_negative_ts','make_zero',output];
 }
 
+/** Preserve the original downloadable filename for MP4 inputs. For other inputs,
+ *  the extension must represent the actual MP4 container, not the source format. */
 export function safeDownloadName(filename) {
-  const stem = filename.replace(/\.[^/.]+$/, '').replace(/[\\/\0-\x1f<>:"|?*]+/g, '_').trim().slice(0,140) || 'video';
-  return `${stem}-compressed.mp4`;
+  const original = String(filename ?? '').split(/[\\/]/).pop() || 'video.mp4';
+  const clean = original.replace(/[\x00-\x1f<>:"|?*]/g, '_').trim().replace(/[. ]+$/g, '').slice(0, 180);
+  if (!clean) return 'video.mp4';
+  const match = clean.match(/\.([a-z0-9]{2,8})$/i);
+  if (match && match[1].toLowerCase() === 'mp4') return clean;
+  const stem = match ? clean.slice(0, -match[0].length) : clean;
+  return `${stem || 'video'}.mp4`;
+}
+
+/** Fast size-aware single-pass H.264 output; retry uses the same path with adjusted bitrate.
+ *  Faster than mandatory two-pass, but size accuracy can be lower on unusual content. */
+export function fastArgs({input, output = 'compressed.mp4', videoKbps, audioKbps, audioPresent = true, copyAudio = false}) {
+  if (!/^[A-Za-z0-9_.-]+$/.test(input) || !/^[A-Za-z0-9_.-]+$/.test(output)) throw new Error('Invalid internal filename.');
+  if (!Number.isFinite(videoKbps) || videoKbps < 70 || videoKbps > 1000000) throw new Error('Invalid video bitrate.');
+  const args = ['-hide_banner','-nostdin','-y','-i',input,
+    '-map','0:v:0','-c:v','libx264','-preset','veryfast',
+    '-b:v',`${Math.floor(videoKbps)}k`, '-maxrate',`${Math.ceil(videoKbps * 1.3)}k`,
+    '-bufsize',`${Math.ceil(videoKbps * 2)}k`, '-pix_fmt','yuv420p', '-threads','1'];
+  if (audioPresent) {
+    args.push('-map','0:a:0?','-c:a',copyAudio ? 'copy' : 'aac');
+    if (!copyAudio) args.push('-b:a',`${audioKbps}k`);
+  } else args.push('-an');
+  return [...args,'-movflags','+faststart','-avoid_negative_ts','make_zero',output];
 }
 
 export function shouldRetry(outputBytes, targetBytes, attemptsSoFar) {

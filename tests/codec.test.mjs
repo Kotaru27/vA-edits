@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {MB,MIB,makePlan,passArgs,parseDuration,parseVideoInfo,parseAudioInfo,formatBytes,safeDownloadName,retryBitrate,shouldRetry} from '../codec.mjs';
+import {MB,MIB,makePlan,passArgs,parseDuration,parseVideoInfo,parseAudioInfo,formatBytes,safeDownloadName,fastArgs,retryBitrate,shouldRetry} from '../codec.mjs';
 
 test('computes a size-aware bitrate with audio and container reserve',()=>{
   const p = makePlan({duration:60,targetMB:10,originalBytes:100*MIB,width:1920,height:1080,fps:30});
@@ -37,7 +37,7 @@ test('parses ffmpeg probe durations and video info',()=>{
   assert.deepEqual(parseVideoInfo(log),{width:1920,height:1080,fps:29.97});
 });
 test('blocks filename injection and shapes output name',()=>{
-  assert.equal(safeDownloadName('abc weird?.mkv'),'abc weird_-compressed.mp4');
+  assert.equal(safeDownloadName('abc weird?.mkv'),'abc weird_.mp4');
   assert.throws(()=>passArgs({input:'../../secret.mp4',videoKbps:2000,audioKbps:96,pass:1}),/filename/);
 });
 test('retry logic shrinks overshooting bitrate once',()=>{
@@ -63,4 +63,27 @@ test('re-encodes source audio when source codec is incompatible or over budget',
 });
 test('parses AAC bitrate from FFmpeg logs',()=>{
   assert.deepEqual(parseAudioInfo(' Stream #0:1(eng): Audio: aac (LC), 48000 Hz, stereo, fltp, 124 kb/s'),{codec:'aac',kbps:124});
+});
+
+test('MP4 output keeps the original filename exactly, including capitalization and spaces',()=>{
+ assert.equal(safeDownloadName('My Vacation Final.MP4'),'My Vacation Final.MP4');
+ assert.equal(safeDownloadName('meeting.mp4'),'meeting.mp4');
+ assert.equal(safeDownloadName('interview.mov'),'interview.mp4');
+ assert.equal(safeDownloadName('movie.avi'),'movie.mp4');
+ assert.equal(safeDownloadName('../not-safe.mp4'),'not-safe.mp4');
+ assert.equal(safeDownloadName('video'),'video.mp4');
+});
+test('fast encoding is single pass and does not change source timing',()=>{
+ const args=fastArgs({input:'input.mp4',output:'compressed.mp4',videoKbps:1200,audioKbps:128});
+ assert.ok(args.includes('veryfast'));
+ assert.ok(!args.includes('-pass'));assert.ok(!args.includes('-r'));
+ assert.ok(args.includes('-maxrate'));assert.ok(args.includes('yuv420p'));
+ assert.ok(args.includes('+faststart'));assert.ok(args.includes('aac'));
+});
+test('fast encoding supports silent video and lossless AAC stream copying',()=>{
+ const silence=fastArgs({input:'input.mkv',videoKbps:800,audioKbps:0,audioPresent:false});
+ assert.ok(silence.includes('-an'));assert.ok(!silence.includes('aac'));
+ const copied=fastArgs({input:'input.mp4',videoKbps:800,audioKbps:128,copyAudio:true});
+ assert.ok(copied.includes('copy'));assert.ok(!copied.includes('-b:a'));
+ assert.throws(()=>fastArgs({input:'../../oops.mp4',videoKbps:800,audioKbps:96}),/filename/);
 });
