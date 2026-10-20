@@ -34,7 +34,7 @@ function updateControls() {
   els.drop.setAttribute('aria-disabled',String(state.busy || state.zipBusy));
   els.button.disabled=state.busy || state.zipBusy || !state.items.length || !validTarget() || !candidates().length;
   els.actionLabel.textContent=state.busy ? 'Compressing…' : `Compress ${candidates().length === 1 ? 'video' : 'videos'}`;
-  els.cancel.hidden=!state.busy;
+  els.cancel.hidden=!state.busy || state.cancelRequested;
   els.count.textContent=`${state.items.length} selected`;
 }
 function activeProgress(percent, label) {
@@ -44,10 +44,14 @@ function activeProgress(percent, label) {
   els.progressFill.style.width=`${p}%`;
   els.progressTrack.setAttribute('aria-valuenow',String(p));
   els.status.textContent=label;
-  if (state.active && p !== state.progressValue && (p%3===0 || p===100)) {
-    state.active.percent=p;
+  if (state.active && p !== state.progressValue) {
+    // Do not move the fill backwards if FFmpeg reports a slightly older timestamp.
+    const shown=Math.max(state.active.percent || 0,p);
+    state.active.percent=shown;
     const value=$(`row-progress-${state.active.id}`);
-    if (value) value.textContent=`${p}%`;
+    if (value) {value.textContent=`${shown}%`;value.setAttribute('aria-label',`${shown}% compressed`);}
+    const fill=$(`row-fill-${state.active.id}`);
+    if (fill) fill.style.transform=`scaleX(${shown/100})`;
   }
   state.progressValue=p;
 }
@@ -66,6 +70,11 @@ function renderQueue() {
   for(let i=0;i<state.items.length;i++) {
     const item=state.items[i]; if(item.status==='done') completed++;
     const row=document.createElement('article'); row.className=`batch-item ${item.status==='working'?'is-working':''}`;
+    if(item.status==='working') {
+      const fill=document.createElement('div');fill.className='row-progress-fill';fill.id=`row-fill-${item.id}`;
+      fill.setAttribute('aria-hidden','true');fill.style.transform=`scaleX(${Math.min(100,item.percent||0)/100})`;
+      row.append(fill);
+    }
     const file=document.createElement('div'); file.className='item-file';
     const num=document.createElement('div'); num.className='item-number'; num.textContent=String(i+1).padStart(2,'0');
     const copy=document.createElement('div'); copy.className='item-copy';
@@ -85,7 +94,7 @@ function renderQueue() {
     const status=document.createElement('span'); status.className='item-status';
     const labels={queued:'Queued',working:'Compressing',done:'Completed',failed:'Failed',canceled:'Canceled'};
     status.textContent=item.status==='working' ? `${item.percent||0}%` : labels[item.status];
-    if(item.status==='working'){status.id=`row-progress-${item.id}`;status.classList.add('active');}
+    if(item.status==='working'){status.id=`row-progress-${item.id}`;status.classList.add('active');status.setAttribute('aria-label',`${item.percent||0}% compressed`);}
     if(item.status==='done') status.classList.add('ok');
     if(item.status==='failed') status.classList.add('error');
     const actions=document.createElement('div');actions.className='item-actions';
@@ -320,6 +329,8 @@ els.drop.addEventListener('click',()=>{if(!state.busy && !state.zipBusy)els.inpu
 els.drop.addEventListener('keydown',e=>{if(!state.busy && !state.zipBusy && (e.key==='Enter'||e.key===' ')){e.preventDefault();els.input.click();}});
 els.input.addEventListener('change',()=>{addFiles([...els.input.files]);els.input.value='';});
 els.button.addEventListener('click',compressBatch);els.cancel.addEventListener('click',cancelBatch);
+// Native number inputs change on trackpad/wheel when focused. Preserve typing and arrow keys.
+els.target.addEventListener('wheel',e=>{if(document.activeElement===els.target)e.preventDefault();},{passive:false});
 els.target.addEventListener('input',()=>{
   if(state.busy || state.zipBusy)return;
   // Changing the size invalidates prior results; never present stale outputs as current.

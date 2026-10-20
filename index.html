@@ -5,7 +5,7 @@
   <meta name="theme-color" content="#f8f7f4">
   <title>Video Compressor — Compress with care</title>
   <meta name="description" content="Compress several videos to a chosen target size, privately in your browser.">
-  <link rel="stylesheet" href="./styles.css?v=4">
+  <link rel="stylesheet" href="./styles.css?v=5">
 </head>
 <body>
   <header class="site-header"><div class="brand"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>compress<span class="brand-dot">.</span></div><div class="header-right"><span class="local-tag"><span class="local-indicator"></span>On-device processing</span></div></header>
@@ -20,19 +20,21 @@
           <p class="upload-title">Drop your videos here</p><p id="uploadHelp" class="upload-sub">or <span class="choose-text">browse files</span> · multiple files supported</p>
         </div>
         <p class="field-help">Up to 450 MB per video, 900 MB per batch. Files stay on your device.</p>
-        <div class="panel-separator"></div>
-        <div class="panel-head"><div class="step-dot">02</div><h2>Target size</h2></div>
-        <label class="field-label" for="targetSize">Maximum output size per video</label>
-        <div class="number-wrap"><input id="targetSize" type="number" min="0.1" step="0.1" max="1024" value="10" inputmode="decimal"><span>MB</span></div>
-        <p class="field-help">The same target applies to each selected video. Fast encoding runs once when possible; difficult videos may need another attempt.</p>
-        <div id="planInsight" class="plan-insight" hidden><span class="insight-label">Quality outlook</span><p id="qualityOutlook"></p></div>
-        <div class="panel-separator"></div>
-        <button class="primary-action" type="button" id="compressButton" disabled><span id="actionLabel">Compress videos</span><span class="action-arrow" aria-hidden="true">↗</span></button>
-        <div class="progress-block" id="progressBlock" hidden aria-live="polite"><div class="progress-line"><strong id="statusText">Preparing...</strong><span id="progressValue">0%</span></div><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Compression progress" id="progressTrack"><div id="progressFill"></div></div><button type="button" class="text-action" id="cancelButton">Cancel remaining batch</button></div>
         <div class="error-box" id="errorBox" hidden role="alert"></div>
       </section>
       <section class="preview-panel batch-panel" aria-label="Compression queue">
-        <div class="preview-top"><div><span class="eyebrow queue-eyebrow">YOUR WORKSPACE</span><h2 class="queue-heading">Video queue <span id="batchCount" class="batch-counter">0 selected</span></h2></div><span class="queue-info">Processed one at a time · MP4 output</span></div>
+        <div class="preview-top">
+          <div class="queue-headline"><span class="eyebrow queue-eyebrow">YOUR WORKSPACE</span><h2 class="queue-heading">Video queue <span id="batchCount" class="batch-counter">0 selected</span></h2><p class="queue-info">Processed one at a time · MP4 output</p></div>
+          <div class="queue-control-stack">
+            <div class="queue-controls">
+              <div class="queue-size-field"><label class="field-label" for="targetSize">Target per video</label><div class="number-wrap"><input id="targetSize" type="number" min="0.1" step="0.1" max="1024" value="8" inputmode="decimal"><span>MB</span></div></div>
+              <button class="primary-action" type="button" id="compressButton" disabled><span id="actionLabel">Compress videos</span><span class="action-arrow" aria-hidden="true">↗</span></button>
+              <button type="button" class="cancel-batch" id="cancelButton" hidden>Cancel</button>
+            </div>
+            <div id="planInsight" class="plan-insight" hidden><span class="insight-label">Quality outlook</span><p id="qualityOutlook"></p></div>
+            <div class="queue-progress" id="progressBlock" hidden aria-live="off"><div class="progress-line"><strong id="statusText">Preparing...</strong><span id="progressValue">0%</span></div><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Compression progress" id="progressTrack"><div id="progressFill"></div></div></div>
+          </div>
+        </div>
         <div class="batch-columns" aria-hidden="true"><span>VIDEO</span><span>ORIGINAL</span><span>COMPRESSED</span><span>STATUS</span><span>ACTIONS</span></div>
         <div id="emptyState" class="batch-empty"><div class="batch-empty-glyph" aria-hidden="true">▤</div><strong>Ready when you are.</strong><span>Your selected videos will appear here. Previews open only when you choose to watch.</span></div>
         <div id="batchList" class="batch-list" aria-live="polite"></div>
@@ -46,6 +48,6 @@
     <div class="dialog-tabs"><button type="button" id="originalTab" aria-pressed="true" class="preview-tab active">Original</button><button type="button" id="outputTab" aria-pressed="false" class="preview-tab">Compressed</button></div>
     <video id="previewVideo" controls playsinline preload="metadata"></video><p id="previewHelp" class="dialog-help">Click play to preview the video.</p>
   </dialog>
-  <script type="module" src="./app.mjs?v=4"></script>
+  <script type="module" src="./app.mjs?v=5"></script>
 </body>
 </html>

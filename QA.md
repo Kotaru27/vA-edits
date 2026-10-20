@@ -1,22 +1,22 @@
-# Video Compressor v3 — release evidence (2026-10-20)
+# Video Compressor v4 — release check (2026-10-20)
 
-## Reproduced and repaired
+## Scope
 
-The v2 app treated `checkBrowserPlayback()` timeout after 15 seconds as a fatal encoding error, revoked the output blob URL and marked the row `Failed`. This could discard an encoded MP4 even though FFmpeg had returned successfully. v3 removes that mandatory post-encode browser start check. It validates the full MP4 top-level box chain (ftyp, moov, mdat and length bounds) before preserving the download. User-requested preview shows native player errors within the dialog, without discarding the file. Incomplete or invalid MP4 structures still fail.
+- Moved target-size input, Compress and Cancel into the queue header; removed duplicate controls from the left panel. Default size is 8 MB per video.
+- Prevented focused number field from changing under a mouse-wheel or trackpad scroll. Native keyboard arrow stepping and direct input remain available.
+- Added a green left-to-right background fill on the active video row, synced with FFmpeg progress reports. The percentage label remains legible, and the fill resets on completion or cancellation.
+- No codec, playback-validator, naming, ZIP, batch-processing or worker changes.
 
-## Executed verification
+## Verified in this cloud workspace
 
-- **28/28** Node tests passed using `node --experimental-vm-modules --test tests/*.test.mjs`. Includes 5 new MP4-container rejection/acceptance tests and all prior bitrate/filename/worker/ZIP tests.
-- `node --check` passed for `app.mjs` and `codec.mjs`.
-- The locally available native FFmpeg test output `tests/compressed.mp4` passed the new `validateMp4` check. Real full-length playback of users' files was not available.
-- Chromium Playwright with simulated FFmpeg encoded two videos, displayed both as Completed, kept `One.MP4` and `Two.mp4` as download filenames, and downloaded a ZIP containing those exact names with valid CRC; zero page errors. It did not require automatic playback-ready events.
-- Responsive Chromium DOM/layout checks at 390, 1080, 1440, 1920, and 2560 pixels showed no document-level horizontal overflow. At 1440px the queue bounds were x=428..1395; at 2560px x=522..2482. Full-width design screenshots were captured locally.
+- Node unit tests: **32/32 passed** (`node --experimental-vm-modules --test tests/*.test.mjs`). Four new source-contract assertions cover the relocated controls, 8 MB default, focus-aware wheel suppression, and progress fill.
+- Chromium browser tests (mock FFmpeg, real UI): at 2560×1440, 1440×900, 1080×900 and 390×844 all four sizes verified: no horizontal overflow; size field and action buttons inside header; action visible within viewport before scrolling; default 8; wheel did not change field; keyboard ArrowUp increased it to 8.1; two queued files completed; fill advanced while compressing; buttons and progress reset afterward. No page errors.
+- Simulated batch ZIP download unzipped with correct filenames and valid ZIP CRC.
+- Screenshots: `tests/v4-2560.png`, `tests/v4-1440.png`, `tests/v4-1080.png`, `tests/v4-390.png` are local QA artifacts, not deployed application assets.
 
-## Not verified
+## Still unverified
 
-- Real WebAssembly FFmpeg compression on deployed GitHub Pages, long 24-second user video, or playback/seek on the user's device. Synthetic browser tests do not substitute for native ffmpeg.wasm behavior.
-- User-perceived performance, atypical encoders, full visual/auditory quality and large-batch memory behavior are not established by these tests.
+- End-to-end real ffmpeg.wasm compression and playback of the user's actual videos on GitHub Pages. Chromium runs above used a simulated encoder, not a full WebAssembly encode.
+- Trackpad-device hardware-specific scrolling outside the focused input; verified equivalent Chromium wheel input.
 
-## Verdict
-
-**Conditional release candidate** until a real 56.1 MB input completes, downloads and plays/ seeks in the user's browser.
+**Release classification:** Conditional until a real browser compression is checked.
