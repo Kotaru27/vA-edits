@@ -1,381 +1,339 @@
-import {MB, MAX_INPUT_BYTES, formatBytes, formatTime, parseDuration, parseVideoInfo, makePlan, parseAudioInfo, passArgs, safeDownloadName, shouldRetry, retryBitrate} from './codec.mjs';
+import { MB, MAX_INPUT_BYTES, MAX_TARGET_MB, formatBytes, formatTime, parseDuration, parseVideoInfo, makePlan, parseAudioInfo, fastArgs, safeDownloadName, shouldRetry, retryBitrate } from './codec.mjs';
+import { makeZip, MAX_BATCH_ZIP_BYTES } from './zip.mjs';
 
 const WRAPPER_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/ffmpeg/0.12.15/umd';
 const CORE_CDN = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
 const CORE_ESM_CDN = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
 const CLASS_WORKER_URL = new URL('./video-worker.js', import.meta.url).href;
+const MAX_FILES = 12;
+const MAX_BATCH_BYTES = 900 * MB;
 const $ = id => document.getElementById(id);
 const els = {
-  input: $('fileInput'), drop: $('dropzone'), uploadTitle: $('uploadTitle'),
-  fileInfo: $('fileInfo'), fileName: $('fileName'), fileMeta: $('fileMeta'), clear: $('clearFile'),
-  target: $('targetSize'), button: $('compressButton'), actionLabel: $('actionLabel'),
-  insight: $('planInsight'), outlook: $('qualityOutlook'),
-  error: $('errorBox'), progress: $('progressBlock'), status: $('statusText'),
-  progressValue: $('progressValue'), progressFill: $('progressFill'), progressTrack: $('progressTrack'), cancel: $('cancelButton'),
-  preview: $('previewVideo'), placeholder: $('stagePlaceholder'), stageMessage: $('stageMessage'),
-  previewState: $('previewState'), tabs: $('previewTabs'), originalTab: $('originalTab'), outputTab: $('outputTab'),
-  result: $('result'), origSize: $('originalSize'), compressedSize: $('compressedSize'), reduction: $('reduction'),
-  resultNote: $('resultNote'), download: $('downloadLink'), previewHelp: $('previewHelp')
+  input:$('fileInput'), drop:$('dropzone'), target:$('targetSize'), button:$('compressButton'),
+  actionLabel:$('actionLabel'), error:$('errorBox'), insight:$('planInsight'), outlook:$('qualityOutlook'),
+  progress:$('progressBlock'), progressFill:$('progressFill'), progressValue:$('progressValue'),
+  progressTrack:$('progressTrack'), status:$('statusText'), cancel:$('cancelButton'),
+  list:$('batchList'), empty:$('emptyState'), count:$('batchCount'), footer:$('batchFooter'),
+  summary:$('batchSummary'), downloadAll:$('downloadAll'),
+  dialog:$('previewDialog'), video:$('previewVideo'), dialogTitle:$('dialogTitle'),
+  originalTab:$('originalTab'), outputTab:$('outputTab'), previewHelp:$('previewHelp'), close:$('closePreview')
 };
-const state = { file: null, duration: NaN, width: 0, height: 0, fps: 0, audioPresent: true, sourceAudio: null,
-  originalURL: '', outputURL: '', busy: false, generation: 0, ffmpeg: null, engineURLs: [], log: '', phase: null, pendingOperation: false };
+const state = {
+  items:[], nextId:1, busy:false, cancelRequested:false, token:0, ffmpeg:null,
+  engineURLs:[], phase:null, active:null, log:'', previewItem:null, previewSourceURL:'',
+  zipBusy:false, progressValue:-1
+};
 
-function setError(message) { els.error.textContent = message; els.error.hidden = !message; }
-function progress(value, text) {
-  const safe = Math.min(100, Math.max(0, Math.round(value)));
-  els.progress.hidden = false;
-  els.status.textContent = text;
-  els.progressValue.textContent = `${safe}%`;
-  els.progressFill.style.width = `${safe}%`;
-  els.progressTrack.setAttribute('aria-valuenow', String(safe));
+function setError(message) { els.error.textContent=message; els.error.hidden=!message; }
+function targetMB() { return Number(els.target.value); }
+function validTarget() { return els.target.value.trim() !== '' && Number.isFinite(targetMB()) && targetMB() >= 0.1 && targetMB() <= MAX_TARGET_MB; }
+function candidates() { return state.items.filter(item => item.status !== 'done'); }
+function updateControls() {
+  els.target.disabled=state.busy || state.zipBusy;
+  els.input.disabled=state.busy || state.zipBusy;
+  els.drop.setAttribute('aria-disabled',String(state.busy || state.zipBusy));
+  els.button.disabled=state.busy || state.zipBusy || !state.items.length || !validTarget() || !candidates().length;
+  els.actionLabel.textContent=state.busy ? 'Compressing…' : `Compress ${candidates().length === 1 ? 'video' : 'videos'}`;
+  els.cancel.hidden=!state.busy;
+  els.count.textContent=`${state.items.length} selected`;
 }
-function setBusy(busy) {
-  state.busy = busy;
-  els.target.disabled = busy;
-  els.clear.disabled = busy;
-  els.drop.setAttribute('aria-disabled', String(busy));
-  els.button.disabled = busy || !state.file || !validTarget();
-  els.actionLabel.textContent = busy ? 'Compressing…' : 'Compress video';
-}
-function validTarget() {
-  const target = Number(els.target.value);
-  return Number.isFinite(target) && target >= 0.1 && target <= 1024 && (!state.file || target * MB < state.file.size);
-}
-function resetOutput() {
-  if (state.outputURL) URL.revokeObjectURL(state.outputURL);
-  state.outputURL = '';
-  els.result.hidden = true;
-  els.download.removeAttribute('href');
-  els.tabs.hidden = true;
-  els.outputTab.classList.remove('active');
-  els.outputTab.setAttribute('aria-pressed','false');
-  els.originalTab.classList.add('active');
-  els.originalTab.setAttribute('aria-pressed','true');
-}
-function clearSelected() {
-  if (state.busy) return;
-  resetOutput();
-  if (state.originalURL) URL.revokeObjectURL(state.originalURL);
-  state.originalURL = '';
-  state.file = null; state.duration = NaN; state.width = 0; state.height = 0; state.fps = 0;
-  els.input.value = '';
-  els.fileInfo.hidden = true;
-  els.uploadTitle.textContent = 'Drop a video here';
-  els.preview.removeAttribute('src'); els.preview.load(); els.preview.hidden = true;
-  els.placeholder.hidden = false; els.stageMessage.hidden = true;
-  els.previewState.textContent = 'NO VIDEO SELECTED';
-  els.previewHelp.textContent = 'Your video stays on your device. Nothing is uploaded.';
-  els.insight.hidden = true; els.progress.hidden = true;
-  setError(''); setBusy(false);
-}
-function setSource(url, label) {
-  els.preview.pause();
-  els.preview.src = url;
-  els.preview.hidden = false;
-  els.placeholder.hidden = true;
-  els.stageMessage.hidden = true;
-  els.previewState.textContent = label;
-  els.preview.load();
-}
-function selectFile(file) {
-  if (state.busy) return;
-  clearSelected();
-  if (!file) return;
-  const supportedExtension = /\.(mp4|mov|m4v|webm|mkv|avi|ts|mts|mpeg|mpg|wmv|3gp)$/i.test(file.name);
-  if (!file.type.startsWith('video/') && !supportedExtension) { setError('Select a video file (MP4, MOV, WebM, MKV, or AVI).'); return; }
-  if (file.size <= 0) { setError('The selected video is empty.'); return; }
-  if (file.size > MAX_INPUT_BYTES) { setError(`This browser version accepts up to ${formatBytes(MAX_INPUT_BYTES)} per file. Larger videos risk exhausting browser memory; they are not processed.`); return; }
-  state.file = file;
-  state.originalURL = URL.createObjectURL(file);
-  els.fileName.textContent = file.name;
-  els.fileMeta.textContent = `${formatBytes(file.size)} · Reading video details…`;
-  els.fileInfo.hidden = false;
-  els.uploadTitle.textContent = 'Choose a different video';
-  els.previewHelp.textContent = 'Original preview. After compression, compare both versions here.';
-  setSource(state.originalURL, 'ORIGINAL');
-  const probe = document.createElement('video');
-  probe.preload = 'metadata';
-  probe.muted = true;
-  probe.src = state.originalURL;
-  const selected = file;
-  probe.onloadedmetadata = () => {
-    if (state.file !== selected) return;
-    state.duration = probe.duration;
-    state.width = probe.videoWidth;
-    state.height = probe.videoHeight;
-    updateFileInfo();
-    updatePlan();
-    probe.removeAttribute('src'); probe.load();
-  };
-  probe.onerror = () => {
-    if (state.file !== selected) return;
-    els.fileMeta.textContent = `${formatBytes(file.size)} · Browser preview may be unavailable`;
-    els.preview.hidden = true;
-    els.stageMessage.hidden = false;
-    els.stageMessage.textContent = 'This source format cannot be previewed here. Compression may still work.';
-    updatePlan();
-  };
-  setBusy(false); updatePlan();
-}
-function updateFileInfo() {
-  if (!state.file) return;
-  const resolution = state.width && state.height ? `${state.width} × ${state.height}` : 'Video';
-  els.fileMeta.textContent = `${formatBytes(state.file.size)} · ${formatTime(state.duration)} · ${resolution}`;
-}
-function updatePlan() {
-  setBusy(state.busy);
-  els.insight.hidden = true;
-  if (!state.file || !validTarget()) return;
-  if (!Number.isFinite(state.duration)) {
-    els.insight.hidden = false;
-    els.outlook.textContent = 'Duration will be read during compression if the browser cannot preview this format.';
-    return;
+function activeProgress(percent, label) {
+  const p=Math.min(100,Math.max(0,Math.round(percent)));
+  els.progress.hidden=false;
+  els.progressValue.textContent=`${p}%`;
+  els.progressFill.style.width=`${p}%`;
+  els.progressTrack.setAttribute('aria-valuenow',String(p));
+  els.status.textContent=label;
+  if (state.active && p !== state.progressValue && (p%3===0 || p===100)) {
+    state.active.percent=p;
+    const value=$(`row-progress-${state.active.id}`);
+    if (value) value.textContent=`${p}%`;
   }
-  try {
-    const p = makePlan({duration:state.duration,targetMB:Number(els.target.value),originalBytes:state.file.size,width:state.width,height:state.height,fps:state.fps});
-    els.insight.hidden = false;
-    els.outlook.textContent = p.warning;
-  } catch (err) { els.insight.hidden = false; els.outlook.textContent = err.message; }
+  state.progressValue=p;
 }
+function releaseOutput(item) {
+  if (item.outputURL) URL.revokeObjectURL(item.outputURL);
+  item.outputURL=''; item.outputBlob=null; item.resultBytes=0; item.note=''; item.percent=0;
+  if (item.status==='done') item.status='queued';
+}
+function releaseEngineURLs() { for(const u of state.engineURLs) URL.revokeObjectURL(u); state.engineURLs=[]; }
+function terminateEngine() { if(state.ffmpeg) { try{state.ffmpeg.terminate();}catch{} state.ffmpeg=null; } releaseEngineURLs(); }
 
-async function urlToBlobURL(url, mime) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Failed loading the video engine (${response.status}).`);
-  const blob = await response.blob();
-  return URL.createObjectURL(new Blob([blob], {type:mime}));
+function renderQueue() {
+  els.list.replaceChildren();
+  const frag=document.createDocumentFragment();
+  let completed=0;
+  for(let i=0;i<state.items.length;i++) {
+    const item=state.items[i]; if(item.status==='done') completed++;
+    const row=document.createElement('article'); row.className=`batch-item ${item.status==='working'?'is-working':''}`;
+    const head=document.createElement('div'); head.className='item-head';
+    const num=document.createElement('div'); num.className='item-number'; num.textContent=String(i+1).padStart(2,'0');
+    const copy=document.createElement('div'); copy.className='item-copy';
+    const name=document.createElement('div'); name.className='item-name'; name.textContent=item.file.name;
+    const meta=document.createElement('div'); meta.className='item-meta';
+    const info=[formatBytes(item.file.size)];
+    if(Number.isFinite(item.duration) && item.duration>0) info.push(formatTime(item.duration));
+    if(item.status==='done') info.push(`${formatBytes(item.resultBytes)} compressed`);
+    meta.textContent=info.join(' · ');
+    copy.append(name,meta);
+    const status=document.createElement('span'); status.className='item-status';
+    const labels={queued:'Ready',working:'Compressing',done:'Ready to download',failed:'Failed',canceled:'Canceled'};
+    status.textContent=item.status==='working' ? `${item.percent||0}%` : labels[item.status];
+    if(item.status==='working'){status.id=`row-progress-${item.id}`;status.classList.add('active');}
+    if(item.status==='done') status.classList.add('ok');
+    if(item.status==='failed') status.classList.add('error');
+    head.append(num,copy,status); row.append(head);
+    const actions=document.createElement('div');actions.className='item-actions';
+    const preview=document.createElement('button'); preview.type='button'; preview.textContent='Preview';
+    preview.disabled=state.busy || state.zipBusy;preview.addEventListener('click',()=>openPreview(item.id));actions.append(preview);
+    if(item.status==='done' && item.outputURL){
+      const a=document.createElement('a'); a.href=item.outputURL; a.download=safeDownloadName(item.file.name);
+      a.textContent='Download MP4 ↓'; a.className='download-one'; actions.append(a);
+    }
+    const remove=document.createElement('button'); remove.type='button'; remove.className='remove-item';
+    remove.textContent='Remove'; remove.disabled=state.busy || state.zipBusy;
+    remove.addEventListener('click',()=>removeItem(item.id)); actions.append(remove);row.append(actions);
+    if(item.note){const note=document.createElement('p');note.className=`item-note ${item.status==='failed'?'error':''}`;note.textContent=item.note;row.append(note);}
+    frag.append(row);
+  }
+  els.list.append(frag);
+  els.empty.hidden=state.items.length>0;
+  els.footer.hidden=state.items.length===0;
+  els.summary.textContent=`${completed} of ${state.items.length} completed`;
+  els.downloadAll.hidden=completed<2;
+  const total=state.items.filter(item=>item.status==='done').reduce((sum,item)=>sum+item.resultBytes,0);
+  els.downloadAll.disabled=state.busy||state.zipBusy||total>MAX_BATCH_ZIP_BYTES;
+  els.downloadAll.title=total>MAX_BATCH_ZIP_BYTES?'Batch ZIP exceeds 300 MB. Download individual videos.':'';
+  if(total>MAX_BATCH_ZIP_BYTES && completed>1) els.summary.textContent+=' · ZIP too large; download individually';
+  updateControls();
 }
-function loadScript(url) {
-  return new Promise((resolve,reject) => {
-    if (window.FFmpegWASM?.FFmpeg) return resolve();
-    const script = document.createElement('script');
-    script.src = url;
-    script.onload = resolve;
-    script.onerror = () => reject(new Error('Unable to load the video engine. Check your network and browser restrictions.'));
-    document.head.append(script);
-  });
+function releaseAll() { for(const item of state.items) releaseOutput(item); }
+function removeItem(id) {
+  if(state.busy || state.zipBusy) return;
+  const index=state.items.findIndex(item=>item.id===id); if(index<0)return;
+  if(state.previewItem?.id===id) els.dialog.close();
+  releaseOutput(state.items[index]);state.items.splice(index,1);setError('');renderQueue();updateOutlook();
 }
-function releaseEngineURLs() {
-  for (const url of state.engineURLs) URL.revokeObjectURL(url);
-  state.engineURLs = [];
+function addFiles(files) {
+  if(state.busy || state.zipBusy) return;
+  setError('');const errors=[];
+  const seen=new Set(state.items.map(item=>`${item.file.name}|${item.file.size}|${item.file.lastModified}`));
+  let sum=state.items.reduce((n,item)=>n+item.file.size,0);
+  for(const file of files) {
+    if(state.items.length>=MAX_FILES){errors.push(`Limit: ${MAX_FILES} videos per batch.`);break;}
+    const ext=/\.(mp4|mov|m4v|webm|mkv|avi|ts|mts|mpeg|mpg|wmv|3gp)$/i.test(file.name);
+    if(!file.type.startsWith('video/')&&!ext){errors.push(`${file.name}: not a recognized video.`);continue;}
+    if(!file.size || file.size>MAX_INPUT_BYTES){errors.push(`${file.name}: file must be between 1 byte and ${formatBytes(MAX_INPUT_BYTES)}.`);continue;}
+    if(sum+file.size>MAX_BATCH_BYTES){errors.push(`Batch limit: ${formatBytes(MAX_BATCH_BYTES)} total. Remove some videos.`);break;}
+    const key=`${file.name}|${file.size}|${file.lastModified}`;
+    if(seen.has(key))continue;
+    seen.add(key);sum+=file.size;
+    const item={id:state.nextId++,file,status:'queued',duration:NaN,width:0,height:0,fps:0,
+      audioPresent:false,sourceAudio:null,outputURL:'',outputBlob:null,resultBytes:0,note:'',percent:0};
+    state.items.push(item);probeBrowserMetadata(item);
+  }
+  renderQueue();updateOutlook();
+  if(errors.length) setError(errors.slice(0,4).join('\n'));
 }
-async function ensureEngine(token) {
-  if (state.ffmpeg?.loaded) return state.ffmpeg;
-  progress(1, 'Loading compression engine…');
+function probeBrowserMetadata(item) {
+  const url=URL.createObjectURL(item.file);const video=document.createElement('video');video.preload='metadata';
+  let ended=false;
+  const finish=()=>{if(ended)return;ended=true;clearTimeout(timer);video.removeAttribute('src');video.load();URL.revokeObjectURL(url);};
+  const timer=setTimeout(finish,12000);
+  video.onloadedmetadata=()=>{
+    item.duration=video.duration;item.width=video.videoWidth;item.height=video.videoHeight;
+    finish();if(state.items.includes(item)){renderQueue();updateOutlook();}
+  };
+  video.onerror=finish;video.src=url;
+}
+function updateOutlook() {
+  els.insight.hidden=true;if(!state.items.length||!validTarget()) return;
+  const warnings=[];
+  for(const item of state.items) {
+    if(item.file.size<=targetMB()*MB) {warnings.push(`${item.file.name}: target must be smaller than original.`);continue;}
+    if(Number.isFinite(item.duration)&&item.duration>0){
+      try{const p=makePlan({duration:item.duration,targetMB:targetMB(),originalBytes:item.file.size,width:item.width,height:item.height,fps:item.fps});
+        if(/loss|soften/i.test(p.warning))warnings.push(`${item.file.name}: ${p.warning}`);
+      }catch(e){warnings.push(`${item.file.name}: ${e.message}`);}
+    }
+  }
+  if(warnings.length){els.insight.hidden=false;els.outlook.textContent=warnings.slice(0,2).join(' ')+(warnings.length>2?' More videos may need a higher target.':'');}
+}
+async function urlToBlobURL(url,mime){const res=await fetch(url);if(!res.ok)throw new Error(`Unable to fetch encoder (${res.status}).`);return URL.createObjectURL(new Blob([await res.blob()],{type:mime}));}
+function loadScript(url){return new Promise((resolve,reject)=>{if(window.FFmpegWASM?.FFmpeg)return resolve();const script=document.createElement('script');script.src=url;script.onload=resolve;script.onerror=()=>reject(new Error('Unable to load video engine. Check CDN/network access.'));document.head.append(script);});}
+async function ensureEngine(token){
+  if(state.ffmpeg?.loaded)return state.ffmpeg;
   await loadScript(`${WRAPPER_CDN}/ffmpeg.min.js`);
-  if (!window.FFmpegWASM?.FFmpeg) throw new Error('The compression engine library did not initialize.');
-  const ffmpeg = new window.FFmpegWASM.FFmpeg();
-  state.ffmpeg = ffmpeg;
-  ffmpeg.on('log', ({message}) => { state.log = (state.log + message + '\n').slice(-48000); });
-  ffmpeg.on('progress', ({progress:p, time}) => {
-    if (token !== state.generation || !state.phase) return;
-    const phase = state.phase;
-    const fraction = Number.isFinite(time) && time > 0 && Number.isFinite(state.duration)
-      ? time / 1e6 / state.duration : p;
-    if (Number.isFinite(fraction) && fraction >= 0 && fraction <= 1.12) {
-      progress(phase.from + Math.min(1, fraction) * (phase.to-phase.from), phase.label);
-    }
+  if(token!==state.token)throw new Error('Canceled.');
+  if(!window.FFmpegWASM?.FFmpeg)throw new Error('Video engine wrapper did not initialize.');
+  const ffmpeg=new window.FFmpegWASM.FFmpeg();state.ffmpeg=ffmpeg;
+  ffmpeg.on('log',({message})=>{state.log=(state.log+message+'\n').slice(-50000);});
+  ffmpeg.on('progress',({progress:ratio,time})=>{
+    if(token!==state.token||!state.phase)return;
+    const p=state.phase;
+    const fraction=Number.isFinite(time)&&time>0&&state.active&&Number.isFinite(state.active.duration)
+      ?time/1e6/state.active.duration:ratio;
+    if(Number.isFinite(fraction)&&fraction>=0&&fraction<=1.12)activeProgress(p.from+Math.min(1,fraction)*(p.to-p.from),p.label);
   });
-  let coreURL, moduleCoreURL, wasmURL;
-  try {
-    [coreURL, moduleCoreURL, wasmURL] = await Promise.all([
-      urlToBlobURL(`${CORE_CDN}/ffmpeg-core.js`, 'text/javascript'),
-      urlToBlobURL(`${CORE_ESM_CDN}/ffmpeg-core.js`, 'text/javascript'),
-      urlToBlobURL(`${CORE_CDN}/ffmpeg-core.wasm`, 'application/wasm')
-    ]);
-    state.engineURLs = [coreURL, moduleCoreURL, wasmURL];
-    if (token !== state.generation) throw new Error('Operation canceled.');
-    // The worker is hosted on our origin; the bundled 814.ffmpeg worker
-    // cannot reliably resolve runtime blob: core URLs on GitHub Pages.
-    let timer;
-    const boot = ffmpeg.load({classWorkerURL: CLASS_WORKER_URL, coreURL, moduleCoreURL, wasmURL});
-    try {
-      await Promise.race([
-        boot,
-        new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error('The video engine did not start within 90 seconds. Check that your network permits the FFmpeg CDN files.')), 90000);
-        })
-      ]);
-    } finally { clearTimeout(timer); }
-    if (!ffmpeg.loaded) throw new Error('Failed to initialize the video encoder.');
+  let timer;
+  try{
+    state.engineURLs=await Promise.all([
+      urlToBlobURL(`${CORE_CDN}/ffmpeg-core.js`,'text/javascript'),
+      urlToBlobURL(`${CORE_ESM_CDN}/ffmpeg-core.js`,'text/javascript'),
+      urlToBlobURL(`${CORE_CDN}/ffmpeg-core.wasm`,'application/wasm')]);
+    if(token!==state.token)throw new Error('Canceled.');
+    const [coreURL,moduleCoreURL,wasmURL]=state.engineURLs;
+    await Promise.race([ffmpeg.load({classWorkerURL: CLASS_WORKER_URL,coreURL,moduleCoreURL,wasmURL}),
+      new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Video engine startup timed out (90 seconds).')),90000);})]);
+    if(!ffmpeg.loaded)throw new Error('Video engine did not initialize.');
     return ffmpeg;
-  } catch (err) {
-    try { ffmpeg.terminate(); } catch {}
-    if (state.ffmpeg === ffmpeg) state.ffmpeg = null;
-    releaseEngineURLs();
-    throw err;
-  }
-  // Engine Blob URLs remain active while the worker exists; cancellation revokes them.
-
+  }catch(e){terminateEngine();throw e;}finally{clearTimeout(timer);}
 }
-async function safeDelete(ffmpeg, file) { try { await ffmpeg.deleteFile(file); } catch {} }
-function sourceVirtualName(file) {
-  const ext = (file.name.match(/\.([a-z0-9]{2,5})$/i)?.[1] || 'mp4').toLowerCase();
-  return `input.${ext}`;
+async function safeDelete(ffmpeg,name){try{await ffmpeg.deleteFile(name);}catch{}}
+function virtualName(item){const ext=item.file.name.match(/\.([a-z0-9]{2,6})$/i)?.[1]?.toLowerCase()||'mp4';return `input.${ext}`;}
+async function probeDetails(ffmpeg,input,item,token){
+  state.log='';await ffmpeg.exec(['-hide_banner','-i',input]);if(token!==state.token)throw new Error('Canceled.');
+  const meta=parseVideoInfo(state.log);
+  if(!Number.isFinite(item.duration)||item.duration<=0)item.duration=parseDuration(state.log);
+  item.width ||= meta.width;item.height ||=meta.height;item.fps=meta.fps;
+  item.sourceAudio=parseAudioInfo(state.log);item.audioPresent=/Stream #.*Audio:/.test(state.log);
+  if(!/Stream #.*Video:/.test(state.log))throw new Error('No valid video stream found.');
+  if(!Number.isFinite(item.duration)||item.duration<=0)throw new Error('Video duration could not be determined.');
 }
-async function probeDetails(ffmpeg, input, token) {
-  state.log = '';
-  await ffmpeg.exec(['-hide_banner','-i',input]);
-  if (token !== state.generation) throw new Error('Compression canceled.');
-  const details = parseVideoInfo(state.log);
-  if (!Number.isFinite(state.duration) || state.duration <= 0) state.duration = parseDuration(state.log);
-  if (!state.width) state.width = details.width;
-  if (!state.height) state.height = details.height;
-  state.fps = details.fps;
-  state.sourceAudio = parseAudioInfo(state.log);
-  state.audioPresent = /Stream #.*Audio:/.test(state.log);
-  if (!/Stream #.*Video:/.test(state.log)) throw new Error('This file does not contain a readable video stream.');
-  if (!Number.isFinite(state.duration) || state.duration <= 0) throw new Error('Could not identify the duration of this video.');
-  updateFileInfo();
+async function encode(ffmpeg,args,token,phase){
+  if(token!==state.token)throw new Error('Canceled.');
+  state.log='';state.phase=phase;activeProgress(phase.from,phase.label);
+  const code=await ffmpeg.exec(args);state.phase=null;
+  if(token!==state.token)throw new Error('Canceled.');
+  if(code!==0){const hint=state.log.split('\n').filter(line=>/error|failed|unknown encoder|invalid|memory/i.test(line)).slice(-3).join(' ');
+    throw new Error(`Encoding failed.${hint?' '+hint.slice(0,240):' Unsupported format or codec.'}`);}
+  activeProgress(phase.to,phase.label);
 }
-async function executePass(ffmpeg, args, token, phase) {
-  if (token !== state.generation) throw new Error('Compression canceled.');
-  state.phase = phase;
-  state.log = '';
-  progress(phase.from, phase.label);
-  const code = await ffmpeg.exec(args);
-  state.phase = null;
-  if (token !== state.generation) throw new Error('Compression canceled.');
-  if (code !== 0) {
-    const lines = state.log.split('\n').filter(Boolean);
-    const hint = lines.filter(s => /error|invalid|unknown encoder|failed|out of memory/i.test(s)).slice(-3).join(' ');
-    throw new Error(`Encoding failed during ${phase.label.toLowerCase()}.${hint ? ` ${hint.slice(0,350)}` : ' This file or codec may not be supported.'}`);
-  }
-  progress(phase.to, phase.label);
-}
-async function verifyOutput(ffmpeg, virtualOutput, bytes, token) {
-  progress(93,'Checking video and audio streams…');
-  // Full stream decode catches bitstream/container errors, not subjective visual quality.
-  state.log = '';
-  const code = await ffmpeg.exec(['-v','error','-xerror','-i',virtualOutput,'-map','0:v:0','-map','0:a:0?','-f','null','/dev/null']);
-  if (token !== state.generation) throw new Error('Compression canceled.');
-  if (code !== 0) throw new Error('The compressed file did not pass the full video/audio decode check.');
-  if (bytes.length < 12 || String.fromCharCode(...bytes.slice(4,8)) !== 'ftyp') throw new Error('The encoded file is not a valid MP4 container.');
-  progress(97,'Checking browser playback…');
-}
-async function checkBrowserPlayback(url) {
-  // This proves decoding starts, not that every frame will play smoothly on every device.
-  const test = document.createElement('video');
-  test.muted = true; test.playsInline = true; test.preload = 'auto';
-  return new Promise((resolve,reject) => {
-    let finished = false;
-    const finish = (err) => {
-      if (finished) return;
-      finished = true; clearTimeout(timeout);
-      test.pause(); test.removeAttribute('src'); test.load();
-      err ? reject(err) : resolve();
-    };
-    const timeout = setTimeout(() => finish(new Error('Browser playback could not be verified in time.')), 15000);
-    test.onerror = () => finish(new Error('The browser could not decode the compressed MP4.'));
-    test.onloadeddata = () => finish(null);
-    test.src = url;
-    test.load();
-    if (test.readyState >= 2) finish(null);
+async function checkBrowserPlayback(url){
+  const player=document.createElement('video');player.muted=true;player.playsInline=true;player.preload='auto';
+  return new Promise((resolve,reject)=>{
+    let finished=false;
+    const done=e=>{if(finished)return;finished=true;clearTimeout(timer);player.pause();player.removeAttribute('src');player.load();e?reject(e):resolve();};
+    const timer=setTimeout(()=>done(new Error('Browser could not verify MP4 playback in time.')),15000);
+    player.onerror=()=>done(new Error('Browser cannot decode the resulting MP4.'));
+    player.onloadeddata=()=>done(null);player.src=url;player.load();
+    if(player.readyState>=2)done(null);
   });
 }
-async function compress() {
-  if (state.busy || !state.file) return;
-  if (!validTarget()) { setError('Choose a target size smaller than the original video, between 0.1 and 1024 MB.'); return; }
-  const token = ++state.generation;
-  const file = state.file;
-  const requestedMB = Number(els.target.value);
-  const input = sourceVirtualName(file), output = 'compressed.mp4';
-  resetOutput(); setError(''); setBusy(true); els.cancel.hidden = false; progress(0, 'Preparing video…');
-  try {
-    const ffmpeg = await ensureEngine(token);
-    progress(7, 'Reading source video…');
-    await ffmpeg.writeFile(input, new Uint8Array(await file.arrayBuffer()));
-    if (token !== state.generation) throw new Error('Compression canceled.');
-    progress(9,'Inspecting video streams…');
-    await probeDetails(ffmpeg, input, token);
-    const plan = makePlan({duration:state.duration,targetMB:requestedMB,originalBytes:file.size,width:state.width,height:state.height,fps:state.fps,audioPresent:state.audioPresent,sourceAudio:state.sourceAudio});
-    updatePlan();
-    let videoKbps = plan.videoKbps, outputBytes;
-    let data;
-    for (let attempt = 1; attempt <= 2; attempt++) {
+async function compressOne(item,token,index,total){
+  const input=virtualName(item),output='compressed.mp4';let ffmpeg;
+  item.status='working';item.note='';item.percent=0;state.active=item;state.progressValue=-1;renderQueue();
+  try{
+    if(item.file.size<=targetMB()*MB)throw new Error('Target must be smaller than the original file.');
+    activeProgress(1,`Video ${index} of ${total} · Loading engine…`);
+    ffmpeg=await ensureEngine(token);
+    activeProgress(6,`Video ${index} of ${total} · Reading source…`);
+    await ffmpeg.writeFile(input,new Uint8Array(await item.file.arrayBuffer()));
+    if(token!==state.token)throw new Error('Canceled.');
+    activeProgress(9,`Video ${index} of ${total} · Inspecting streams…`);
+    await probeDetails(ffmpeg,input,item,token);
+    const plan=makePlan({duration:item.duration,targetMB:targetMB(),originalBytes:item.file.size,width:item.width,height:item.height,fps:item.fps,audioPresent:item.audioPresent,sourceAudio:item.sourceAudio});
+    let kbps=plan.videoKbps;let data;
+    for(let attempt=1;attempt<=2;attempt++){
       await safeDelete(ffmpeg,output);
-      await safeDelete(ffmpeg,'ratepass-0.log');
-      await safeDelete(ffmpeg,'ratepass-0.log.mbtree');
-      const first = attempt === 1 ? {from:12,to:46,label:'Analyzing video (pass 1 of 2)…'} : {from:69,to:79,label:'Refining target size (analysis)…'};
-      const second = attempt === 1 ? {from:46,to:90,label:'Encoding compressed MP4 (pass 2 of 2)…'} : {from:79,to:92,label:'Refining target size (encoding)…'};
-      await executePass(ffmpeg,passArgs({input,output,videoKbps,audioKbps:plan.audioKbps,pass:1,audioPresent:state.audioPresent,copyAudio:plan.copyAudio}),token,first);
-      await executePass(ffmpeg,passArgs({input,output,videoKbps,audioKbps:plan.audioKbps,pass:2,audioPresent:state.audioPresent,copyAudio:plan.copyAudio}),token,second);
-      data = await ffmpeg.readFile(output);
-      if (!(data instanceof Uint8Array) || !data.length) throw new Error('The encoder produced an empty file.');
-      outputBytes = data.length;
-      if (!shouldRetry(outputBytes,plan.targetBytes,attempt)) break;
-      videoKbps = retryBitrate(videoKbps,plan.targetBytes,outputBytes);
-      if (videoKbps <= 70) break;
-      progress(69,'Fine-tuning output size…');
+      const phase=attempt===1?{from:12,to:89,label:`Video ${index} of ${total} · Fast encoding…`}:{from:89,to:97,label:`Video ${index} of ${total} · Adjusting file size…`};
+      await encode(ffmpeg,fastArgs({input,output,videoKbps:kbps,audioKbps:plan.audioKbps,audioPresent:item.audioPresent,copyAudio:plan.copyAudio}),token,phase);
+      data=await ffmpeg.readFile(output);
+      if(!(data instanceof Uint8Array)||data.length<12||String.fromCharCode(...data.subarray(4,8))!=='ftyp')throw new Error('Encoder did not produce a valid MP4 container.');
+      if(!shouldRetry(data.length,plan.targetBytes,attempt))break;
+      const retry=retryBitrate(kbps,plan.targetBytes,data.length);
+      if(retry<70||retry>=kbps)break;
+      kbps=retry;
     }
-    if (!data) throw new Error('No compressed output was produced.');
-    await verifyOutput(ffmpeg,output,data,token);
-    const mp4 = new Blob([data],{type:'video/mp4'});
-    const url = URL.createObjectURL(mp4);
-    try { await checkBrowserPlayback(url); }
-    catch (err) { URL.revokeObjectURL(url); throw err; }
-    if (token !== state.generation) { URL.revokeObjectURL(url); return; }
-    state.outputURL = url;
-    els.download.href = url;
-    els.download.download = safeDownloadName(file.name);
-    els.origSize.textContent = formatBytes(file.size);
-    els.compressedSize.textContent = formatBytes(outputBytes);
-    els.reduction.textContent = `${Math.max(0, Math.round((1-outputBytes/file.size)*100))}%`;
-    els.resultNote.textContent = outputBytes > plan.targetBytes
-      ? 'The output is slightly above your target. The browser encoder could not reach the size in two attempts.'
-      : 'MP4 structure, full stream decoding and browser startup playback checked. Compare quality before sharing.';
-    els.result.hidden = false;
-    els.tabs.hidden = false;
-    showPreview('output');
-    progress(100,'Compression complete');
-    els.cancel.hidden = true;
-    els.previewHelp.textContent = 'Check the picture and sound in the compressed preview before downloading.';
-  } catch(err) {
-    if (token === state.generation) setError(err instanceof Error ? err.message : String(err));
-  } finally {
-    if (token === state.generation) {
-      state.phase = null;
-      els.progress.hidden = !state.outputURL;
-      els.cancel.hidden = true;
-      // Keep controls locked during cleanup so a second run cannot lose its input/output files.
-      if (state.ffmpeg?.loaded) {
-        for (const f of [input,output,'ratepass-0.log','ratepass-0.log.mbtree']) await safeDelete(state.ffmpeg,f);
-      }
-      setBusy(false);
-    }
+    activeProgress(97,`Video ${index} of ${total} · Checking playback…`);
+    const blob=new Blob([data],{type:'video/mp4'});
+    const url=URL.createObjectURL(blob);
+    try{await checkBrowserPlayback(url);}catch(e){URL.revokeObjectURL(url);throw e;}
+    if(token!==state.token){URL.revokeObjectURL(url);throw new Error('Canceled.');}
+    item.outputBlob=blob;item.outputURL=url;item.resultBytes=blob.size;item.status='done';item.percent=100;
+    item.note=blob.size>plan.targetBytes?'Output is above your requested size despite a retry. Try a larger target or a different video.':'MP4 container and browser playback startup verified.';
+    activeProgress(100,`Video ${index} of ${total} · Complete`);
+  }catch(e){
+    item.status=state.cancelRequested?'canceled':'failed';item.note=e instanceof Error?e.message:String(e);
+    if(/memory|terminated|Cannot load|core|engine/i.test(item.note)&&!state.cancelRequested)terminateEngine();
+  }finally{
+    state.phase=null;
+    if(ffmpeg&&ffmpeg===state.ffmpeg){await safeDelete(ffmpeg,input);await safeDelete(ffmpeg,output);}
+    state.active=null;renderQueue();updateOutlook();
   }
 }
-function showPreview(mode) {
-  if (!state.file) return;
-  const output = mode === 'output' && state.outputURL;
-  setSource(output ? state.outputURL : state.originalURL, output ? 'COMPRESSED · MP4' : 'ORIGINAL');
-  els.originalTab.classList.toggle('active',!output);
-  els.outputTab.classList.toggle('active',!!output);
-  els.originalTab.setAttribute('aria-pressed',String(!output));
-  els.outputTab.setAttribute('aria-pressed',String(!!output));
+async function compressBatch(){
+  if(state.busy||state.zipBusy||!validTarget()||!candidates().length)return;
+  setError('');state.busy=true;state.cancelRequested=false;
+  const token=++state.token;
+  const pending=candidates();renderQueue();
+  try{
+    for(let i=0;i<pending.length;i++){
+      if(state.cancelRequested||token!==state.token)break;
+      await compressOne(pending[i],token,i+1,pending.length);
+    }
+    if(!state.cancelRequested){const fail=pending.filter(item=>item.status==='failed');if(fail.length)setError(`${fail.length} video(s) could not be compressed. See the message beside each file. You can retry them.`);}
+  }finally{
+    if(state.cancelRequested){for(const item of pending){if(item.status==='queued'){item.status='canceled';item.note='Not processed (batch canceled).';}}}
+    state.busy=false;state.active=null;state.phase=null;els.progress.hidden=true;
+    state.cancelRequested=false;renderQueue();
+  }
 }
-function cancel() {
-  if (!state.busy) return;
-  ++state.generation;
-  state.phase = null;
-  if (state.ffmpeg) { try { state.ffmpeg.terminate(); } catch {} state.ffmpeg = null; }
-  releaseEngineURLs();
-  setBusy(false); els.progress.hidden = true;
-  setError('Compression canceled. Your original video is unchanged.');
+function cancelBatch(){
+  if(!state.busy||state.cancelRequested)return;
+  state.cancelRequested=true;++state.token;
+  if(state.active){state.active.status='canceled';state.active.note='Canceled; original video unchanged.';}
+  terminateEngine();activeProgress(0,'Canceling current video…');renderQueue();
 }
-
-els.drop.addEventListener('click', () => { if (!state.busy) els.input.click(); });
-els.drop.addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && !state.busy) { e.preventDefault(); els.input.click(); } });
-els.input.addEventListener('change', () => selectFile(els.input.files?.[0]));
-els.clear.addEventListener('click', clearSelected);
-els.target.addEventListener('input',() => { if (!state.busy) { resetOutput(); updatePlan(); setError(''); if (state.originalURL) showPreview('original'); } });
-els.button.addEventListener('click', compress);
-els.cancel.addEventListener('click',cancel);
-els.originalTab.addEventListener('click',()=>showPreview('original'));
-els.outputTab.addEventListener('click',()=>showPreview('output'));
-['dragenter','dragover'].forEach(type => els.drop.addEventListener(type,e => { e.preventDefault(); if (!state.busy) els.drop.classList.add('drag-over'); }));
-['dragleave','drop'].forEach(type => els.drop.addEventListener(type,e => { e.preventDefault(); els.drop.classList.remove('drag-over'); }));
-els.drop.addEventListener('drop',e => { if (!state.busy) selectFile(e.dataTransfer?.files?.[0]); });
-window.addEventListener('dragover',e=>e.preventDefault());
-window.addEventListener('drop',e=>e.preventDefault());
-window.addEventListener('beforeunload',() => { if (state.originalURL) URL.revokeObjectURL(state.originalURL); if (state.outputURL) URL.revokeObjectURL(state.outputURL); releaseEngineURLs(); });
-clearSelected();
+function closePreview(){els.video.pause();els.video.removeAttribute('src');els.video.load();if(state.previewSourceURL)URL.revokeObjectURL(state.previewSourceURL);state.previewSourceURL='';state.previewItem=null;}
+function setPreviewMode(mode){
+  const item=state.previewItem;if(!item)return;
+  const output=mode==='output'&&item.outputURL;
+  els.video.pause();
+  if(state.previewSourceURL)URL.revokeObjectURL(state.previewSourceURL);
+  state.previewSourceURL='';
+  els.video.src=output?item.outputURL:(state.previewSourceURL=URL.createObjectURL(item.file));
+  els.video.load();
+  els.originalTab.classList.toggle('active',!output);els.outputTab.classList.toggle('active',!!output);
+  els.originalTab.setAttribute('aria-pressed',String(!output));els.outputTab.setAttribute('aria-pressed',String(!!output));
+  els.previewHelp.textContent=output?'Compressed MP4 preview. Check image, audio, and seeking before sharing.':'Original video preview (if supported by your browser).';
+}
+function openPreview(id){
+  if(state.busy)return;
+  const item=state.items.find(x=>x.id===id);if(!item)return;
+  state.previewItem=item;els.dialogTitle.textContent=item.file.name;
+  els.outputTab.hidden=item.status!=='done';
+  setPreviewMode(item.outputURL?'output':'original');els.dialog.showModal();
+}
+async function downloadAll(){
+  if(state.zipBusy||state.busy)return;
+  const completed=state.items.filter(x=>x.status==='done');if(completed.length<2)return;
+  if(completed.reduce((n,x)=>n+x.resultBytes,0)>MAX_BATCH_ZIP_BYTES){setError('Batch ZIP exceeds 300 MB. Download the videos individually.');return;}
+  state.zipBusy=true;renderQueue();setError('');
+  try{
+    const blob=await makeZip(completed.map(item=>({name:safeDownloadName(item.file.name),blob:item.outputBlob})));
+    const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='compressed-videos.zip';
+    document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+  }catch(e){setError(`ZIP download failed: ${e instanceof Error?e.message:String(e)}`);}
+  finally{state.zipBusy=false;renderQueue();}
+}
+els.drop.addEventListener('click',()=>{if(!state.busy && !state.zipBusy)els.input.click();});
+els.drop.addEventListener('keydown',e=>{if(!state.busy && !state.zipBusy && (e.key==='Enter'||e.key===' ')){e.preventDefault();els.input.click();}});
+els.input.addEventListener('change',()=>{addFiles([...els.input.files]);els.input.value='';});
+els.button.addEventListener('click',compressBatch);els.cancel.addEventListener('click',cancelBatch);
+els.target.addEventListener('input',()=>{
+  if(state.busy || state.zipBusy)return;
+  // Changing the size invalidates prior results; never present stale outputs as current.
+  releaseAll();for(const item of state.items){item.status='queued';item.note='';}
+  setError('');renderQueue();updateOutlook();
+});
+['dragenter','dragover'].forEach(event=>els.drop.addEventListener(event,e=>{e.preventDefault();if(!state.busy && !state.zipBusy)els.drop.classList.add('drag-over');}));
+['dragleave','drop'].forEach(event=>els.drop.addEventListener(event,e=>{e.preventDefault();els.drop.classList.remove('drag-over');}));
+els.drop.addEventListener('drop',e=>{if(!state.busy && !state.zipBusy)addFiles([...e.dataTransfer.files]);});
+window.addEventListener('dragover',e=>e.preventDefault());window.addEventListener('drop',e=>e.preventDefault());
+els.originalTab.addEventListener('click',()=>setPreviewMode('original'));
+els.outputTab.addEventListener('click',()=>setPreviewMode('output'));
+els.close.addEventListener('click',()=>els.dialog.close());els.dialog.addEventListener('close',closePreview);
+els.downloadAll.addEventListener('click',downloadAll);
+window.addEventListener('beforeunload',()=>{closePreview();for(const item of state.items)releaseOutput(item);terminateEngine();});
+renderQueue();

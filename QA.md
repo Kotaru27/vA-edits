@@ -1,31 +1,20 @@
-# Release verification — Browser Video Compressor v1.0 (2026-10-20)
+# Video Compressor v2 — release evidence (2026-10-20)
 
-## Evidence
+## Checked in this build
 
-- **13/13 unit tests passed** using Node's built-in test runner (`codec.test.mjs`). Tested: target calculation, too-small targets, AAC copy/encode selection, input filename safety, FFmpeg arguments, optional audio, retry behavior, metadata parsing, bytes formatting.
-- **Syntax checks passed** for `app.mjs` and `codec.mjs`.
-- **Native FFmpeg transcoding tests passed** on generated synthetic video: two-pass x264 + AAC output 560,969 bytes for an earlier 576,716-byte test target with 640x360 resolution at 24 fps; full stream decoding exited 0.
-- **AAC copy test passed** at the updated decimal target: output 1,048,000 bytes approximately for 1.1 MB target; actual copied AAC stream SHA-256 was identical between original and output (`eda9f2ddad904be62ec13f0520d828ff69b116fa9ace87969c202449ccc8804a`).
-- **No-audio test passed**: output 294,078 bytes under 300,000-byte target; decode exited 0.
-- **HTML references checked**: all local JS/CSS references existed; 35 DOM IDs had no duplicates.
+- **23/23** Node.js tests passed (`node --experimental-vm-modules --test tests/*.test.mjs`): existing encoding-planner and worker contract checks; new fast-encode command, exact original MP4 filename, non-MP4 extension, and ZIP checks.
+- JavaScript syntax checks passed for `app.mjs`, `codec.mjs`, `zip.mjs`.
+- Native FFmpeg comparative **4-second synthetic fixture**: new one-pass `veryfast` H.264/AAC 0.518 seconds, previous medium two-pass plus full decode 0.364 + 0.774 + 0.185 = **1.323 seconds**, ~2.55x relative difference **on that short native test only**. Both outputs report 640×360 at 24 fps with H.264 video and AAC audio. Native timings are not a browser/WebAssembly speed guarantee.
+- Browser DOM test via Playwright `page.set_content` (no navigation) passed: 2 selected video files, no preview open by default, optional preview opens and closes, target input and removal work; zero JS page errors.
+- Browser UI integration with **mocked FFmpeg backend** passed: two jobs completed in sequence, suggested filenames remained `One.MP4` and `Two.mp4`, batch ZIP was downloaded; Python standard-library ZIP verification confirmed both member filenames and CRC validity. This does **not** prove the actual ffmpeg.wasm engine compressed these files.
+- Standalone ZIP builder test produced a valid archive with unicode filenames and deterministic collision handling.
 
 ## Not verified
 
-- **Real ffmpeg.wasm encoding inside a browser** was not executed: the browser automation environment rejected localhost navigation with `net::ERR_BLOCKED_BY_ADMINISTRATOR`.
-- CDN availability, Web Worker creation and browser playback in a deployed GitHub Pages origin require live browser verification; do not equate native FFmpeg tests with WASM proof.
-- Subjective image/audio fidelity, HDR handling, variable-frame-rate sources, uncommon codecs, long recordings and the upper browser memory limit are unverified.
-- This artifact is not deployed to a live URL or committed to a GitHub repository.
+- Real browser ffmpeg.wasm v2 end-to-end encoding on GitHub Pages: browser navigation to local test origin is blocked by `net::ERR_BLOCKED_BY_ADMINISTRATOR`. The deployed HTTPS page, worker/CDN loading, actual downloads, cancellation under heavy files, and playback through the entire video remain to be checked on a user browser.
+- Typical speedup on long videos and user hardware has not been measured; input complexity, CPU, browser memory, and whether a second encoding pass is triggered can change performance dramatically.
+- Visual quality equivalence is not guaranteed. One-pass compression can be less accurate near a strict target than two-pass compression; aggressive size settings may compromise fidelity.
 
-## Release status
+## Status
 
-**Conditional candidate**, not production certified. It is safe to inspect and deploy to a test GitHub Pages origin; test a real video and download/seek/play through output on the target browser before sharing broadly.
-
-## Worker-loader hotfix (2026-10-20)
-
-- User reported on GitHub Pages: `Cannot find module 'blob:https://kotaru27.github.io/...'`.
-- Analysis: the prebuilt UMD `814.ffmpeg` worker can route a dynamic core import to Webpack's internal loader; this cannot resolve runtime `blob:` URLs. The issue is documented upstream as ffmpegwasm/ffmpeg.wasm#619.
-- Patch: same-origin `video-worker.js` runs native classic/ESM core loading and responds using FFmpeg.wasm's message protocol; core and wrapper versions and output settings are unchanged.
-- Tests: **17/17 passed** (`node --experimental-vm-modules --test tests/*.test.mjs`). The four new tests use stubbed FFmpeg factories in Node VM; they cover both worker types and response/error/file/exec protocol, **not** a real WASM encode.
-- Source syntax checked with `node --check app.mjs` and `node --check video-worker.js`.
-- Headless Chromium navigation remained **blocked by environment policy**, including `data:` pages, so an actual browser-side FFmpeg boot/encode/playback test was **NOT RUN**.
-- Release status: **conditional hotfix**, pending browser verification on the deployed Pages URL.
+**Conditional upgrade** pending real-world browser compression verification. Tests in this document distinguish real native media checks, browser DOM/mocked integration and unverified CDN/WebAssembly production behavior.
