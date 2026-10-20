@@ -82,6 +82,36 @@ export function passArgs({input, output = 'compressed.mp4', videoKbps, audioKbps
 
 /** Preserve the original downloadable filename for MP4 inputs. For other inputs,
  *  the extension must represent the actual MP4 container, not the source format. */
+/** Validate the top-level MP4 box structure before exposing the result as a download.
+ * A valid container is not proof that every frame can be decoded on every device.
+ */
+export function validateMp4(data) {
+  if (!(data instanceof Uint8Array) || data.byteLength < 32) throw new Error('Encoder returned an incomplete MP4.');
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  let pos = 0, hasFtyp = false, hasMoov = false, hasMdat = false;
+  while (pos < data.byteLength) {
+    if (data.byteLength - pos < 8) throw new Error('MP4 contains a truncated box header.');
+    let length = view.getUint32(pos, false);
+    const type = String.fromCharCode(data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]);
+    let header = 8;
+    if (length === 1) {
+      if (data.byteLength - pos < 16) throw new Error('MP4 extended box header is truncated.');
+      length = view.getUint32(pos + 8, false) * 4294967296 + view.getUint32(pos + 12, false);
+      header = 16;
+    } else if (length === 0) length = data.byteLength - pos;
+    if (!Number.isSafeInteger(length) || length < header || length > data.byteLength - pos) {
+      throw new Error('MP4 container contains a damaged box.');
+    }
+    if (pos === 0 && type !== 'ftyp') throw new Error('Encoded output is not an MP4.');
+    if (type === 'ftyp') hasFtyp = true;
+    if (type === 'moov') hasMoov = true;
+    if (type === 'mdat' && length > header) hasMdat = true;
+    pos += length;
+  }
+  if (!hasFtyp || !hasMoov || !hasMdat) throw new Error('MP4 container is missing required video data or metadata.');
+  return true;
+}
+
 export function safeDownloadName(filename) {
   const original = String(filename ?? '').split(/[\\/]/).pop() || 'video.mp4';
   const clean = original.replace(/[\x00-\x1f<>:"|?*]/g, '_').trim().replace(/[. ]+$/g, '').slice(0, 180);
