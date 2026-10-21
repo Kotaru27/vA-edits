@@ -1,4 +1,4 @@
-import { MB, MAX_INPUT_BYTES, MAX_TARGET_MB, formatBytes, formatTime, parseDuration, parseVideoInfo, makePlan, parseAudioInfo, parseAudioTracks, fastArgs, safeDownloadName, shouldRetry, retryBitrate, validateMp4 } from './codec.mjs';
+import { MB, MAX_INPUT_BYTES, MAX_TARGET_MB, formatBytes, formatTime, parseDuration, parseVideoInfo, makePlan, parseAudioInfo, parseAudioTracks, fastArgs, passArgs, chooseEncodingStrategy, safeDownloadName, shouldRetry, retryBitrate, validateMp4 } from './codec.mjs';
 import { makeZip, MAX_BATCH_ZIP_BYTES } from './zip.mjs';
 import { parseProbeReport } from './probe.mjs';
 
@@ -6,7 +6,7 @@ const WRAPPER_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/ffmpeg/0.12.15/umd';
 const CORE_CDN = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
 const CORE_ESM_CDN = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
 const CLASS_WORKER_URL = new URL('./video-worker.js', import.meta.url).href;
-const MAX_FILES = 12;
+const MAX_FILES = 5;
 const MAX_BATCH_BYTES = 900 * MB;
 // Browsers do not expose a reliable free-memory measurement. These are conservative
 // guardrails, not assurances that FFmpeg.wasm cannot run out of memory.
@@ -27,7 +27,7 @@ const els = {
   originalTab:$('originalTab'), outputTab:$('outputTab'), previewHelp:$('previewHelp'), close:$('closePreview')
 };
 const state = {
-  items:[], nextId:1, busy:false, cancelRequested:false, token:0, ffmpeg:null,
+  items:[], nextId:1, busy:false, cancelRequested:false, sessionStarted:false, token:0, ffmpeg:null,
   engineURLs:[], phase:null, active:null, log:'', previewItem:null, previewSourceURL:'',
   zipBusy:false, progressValue:-1
 };
@@ -38,8 +38,8 @@ function validTarget() { return els.target.value.trim() !== '' && Number.isFinit
 function candidates() { return state.items.filter(item => item.status !== 'done' || item.recompress); }
 function updateControls() {
   els.target.disabled=state.busy || state.zipBusy;
-  els.input.disabled=state.busy || state.zipBusy;
-  els.drop.setAttribute('aria-disabled',String(state.busy || state.zipBusy));
+  els.input.disabled=state.busy || state.zipBusy || state.sessionStarted;
+  els.drop.setAttribute('aria-disabled',String(state.busy || state.zipBusy || state.sessionStarted));
   els.button.disabled=state.busy || state.zipBusy || !state.items.length || !validTarget() || !candidates().length;
   els.actionLabel.textContent=state.busy ? 'Compressing…' : `Compress ${candidates().length === 1 ? 'video' : 'videos'}`;
   els.cancel.hidden=!state.busy || state.cancelRequested;
@@ -137,6 +137,7 @@ function renderQueue() {
   els.empty.hidden=state.items.length>0;
   els.footer.hidden=state.items.length===0;
   els.summary.textContent=`${completed} of ${state.items.length} completed`;
+  if(state.sessionStarted&&!state.busy)els.summary.textContent+=' · Download results before refreshing for a new batch';
   els.downloadAll.hidden=completed<2;
   const total=state.items.filter(item=>item.status==='done').reduce((sum,item)=>sum+item.resultBytes,0);
   els.downloadAll.disabled=state.busy||state.zipBusy||total>MAX_BATCH_ZIP_BYTES;
@@ -152,6 +153,7 @@ function removeItem(id) {
 }
 function addFiles(files) {
   if(state.busy || state.zipBusy) return;
+  if(state.sessionStarted){setError('This session is closed to new videos. Download your results, then refresh to start another batch.');return;}
   setError('');const errors=[];
   const seen=new Set(state.items.map(item=>`${item.file.name}|${item.file.size}|${item.file.lastModified}`));
   let sum=state.items.reduce((n,item)=>n+item.file.size,0);
@@ -186,7 +188,11 @@ function probeBrowserMetadata(item) {
 function qualityOutlook(item) {
   if(!validTarget())return null;
   const estimateTarget=item.status==='done'&&!item.recompress&&item.encodedTargetMB!=null?item.encodedTargetMB:targetMB();
-  if(item.file.size<=estimateTarget*MB)return {tone:'critical',message:'Target must be smaller than this video.'};
+  if(item.file.size<=estimateTarget*MB){
+    return /\.mp4$/i.test(item.file.name)
+      ? {tone:'normal',message:'Already within target; original MP4 can be kept unchanged.'}
+      : {tone:'warning',message:'Already within target; select a smaller size to convert this file to MP4.'};
+  }
   if(!Number.isFinite(item.duration)||item.duration<=0)return {tone:'pending',message:'Reading video details for the quality estimate…'};
   try {
     const plan=makePlan({duration:item.duration,targetMB:item.status==='done'&&!item.recompress && item.encodedTargetMB!=null?item.encodedTargetMB:targetMB(),originalBytes:item.file.size,width:item.width,height:item.height,fps:item.fps,audioPresent:item.audioPresent,sourceAudio:item.sourceAudio,audioTracks:item.audioTracks});
@@ -349,7 +355,18 @@ async function compressOne(item,token,index,total){
   const selectedTarget=targetMB();
   item.status='working';item.note='';item.percent=0;state.active=item;state.progressValue=-1;renderQueue();
   try{
-    if(item.file.size<=selectedTarget*MB)throw new Error('Target must be smaller than the original file.');
+    if(item.file.size<=selectedTarget*MB){
+      if(!/\.mp4$/i.test(item.file.name))throw new Error('This file already fits the target. Upload an MP4 to keep it unchanged, or select a smaller target to convert it.');
+      // Never recompress a compatible-size MP4: retain its exact original bytes.
+      const bytes=new Uint8Array(await item.file.arrayBuffer());validateMp4(bytes);
+      const url=URL.createObjectURL(item.file);
+      if(previous?.url)URL.revokeObjectURL(previous.url);
+      item.outputBlob=item.file;item.outputURL=url;item.resultBytes=item.file.size;
+      item.status='done';item.percent=100;item.encodedTargetMB=selectedTarget;item.recompress=false;
+      item.note='Already within the requested size. Original MP4 retained byte for byte; no re-encoding or quality loss.';
+      activeProgress(100,`Video ${index} of ${total} · Original already fits`);
+      return;
+    }
     activeProgress(1,`Video ${index} of ${total} · Loading engine…`);
     ffmpeg=await ensureEngine(token);
     activeProgress(6,`Video ${index} of ${total} · Reading source…`);
@@ -360,10 +377,33 @@ async function compressOne(item,token,index,total){
     updateOutlook();
     const plan=makePlan({duration:item.duration,targetMB:selectedTarget,originalBytes:item.file.size,width:item.width,height:item.height,fps:item.fps,audioPresent:item.audioPresent,sourceAudio:item.sourceAudio,audioTracks:item.audioTracks});
     let kbps=plan.videoKbps;let data;
+    const strategy=chooseEncodingStrategy(plan,{duration:item.duration,sourceBytes:item.file.size,deviceMemory:navigator.deviceMemory});
+    let twoPassFallback=false;
     for(let attempt=1;attempt<=2;attempt++){
       await safeDelete(ffmpeg,output);
-      const phase=attempt===1?{from:12,to:89,label:`Video ${index} of ${total} · Fast encoding…`}:{from:89,to:97,label:`Video ${index} of ${total} · Adjusting file size…`};
-      await encode(ffmpeg,fastArgs({input,output,videoKbps:kbps,audioKbps:plan.audioKbps,audioPresent:item.audioPresent,copyAudio:plan.copyAudio}),token,phase);
+      await safeDelete(ffmpeg,'ratepass-0.log');await safeDelete(ffmpeg,'ratepass-0.log.mbtree');
+      const start=attempt===1?12:89,end=attempt===1?89:97;
+      const settings={input,output,videoKbps:kbps,audioKbps:plan.audioKbps,audioPresent:item.audioPresent,copyAudio:plan.copyAudio};
+      if(strategy.twoPass&&!twoPassFallback){
+        try{
+          const midpoint=start+(end-start)*0.42;
+          await encode(ffmpeg,passArgs({...settings,pass:1}),token,
+            {from:start,to:midpoint,label:`Video ${index} of ${total} · Quality analysis (pass 1/2)…`});
+          await encode(ffmpeg,passArgs({...settings,pass:2}),token,
+            {from:midpoint,to:end,label:`Video ${index} of ${total} · Quality encoding (pass 2/2)…`});
+        }catch(error){
+          if(token!==state.token||state.cancelRequested)throw error;
+          // Some browser FFmpeg builds cannot write two-pass stats. Keep the
+          // original error if the safe single-pass fallback fails as well.
+          twoPassFallback=true;
+          await safeDelete(ffmpeg,output);
+          await encode(ffmpeg,fastArgs({...settings,preset:'fast'}),token,
+            {from:start,to:end,label:`Video ${index} of ${total} · Compatible encoding…`});
+        }
+      }else{
+        await encode(ffmpeg,fastArgs({...settings,preset:strategy.twoPass?'fast':strategy.preset}),token,
+          {from:start,to:end,label:`Video ${index} of ${total} · Encoding MP4…`});
+      }
       data=await ffmpeg.readFile(output);
       validateMp4(data);
       if(!shouldRetry(data.length,plan.targetBytes,attempt))break;
@@ -384,7 +424,7 @@ async function compressOne(item,token,index,total){
     item.encodedTargetMB=selectedTarget;item.recompress=false;
     item.note=blob.size>plan.targetBytes
       ? 'The output is above your requested size after retry. Try a larger target. Preview to check playback.'
-      : 'MP4 and sampled media verified. Preview to check picture, audio, and seeking.';
+      : `${strategy.twoPass&&!twoPassFallback?'Quality-focused two-pass encoding':'Size-aware encoding'} complete. MP4 and sampled media verified; preview to check picture, audio, and seeking.`;
     activeProgress(100,`Video ${index} of ${total} · Complete`);
   }catch(e){
     const message=e instanceof Error?e.message:String(e);
@@ -397,6 +437,7 @@ async function compressOne(item,token,index,total){
   }finally{
     state.phase=null;
     if(ffmpeg&&ffmpeg===state.ffmpeg){await safeDelete(ffmpeg,input);await safeDelete(ffmpeg,output);
+      await safeDelete(ffmpeg,'ratepass-0.log');await safeDelete(ffmpeg,'ratepass-0.log.mbtree');
       // Release retained WASM heap after a large encode; smaller clips reuse the engine for speed.
       if(item.file.size>140*MB)terminateEngine();}
     state.active=null;renderQueue();updateOutlook();
@@ -404,7 +445,7 @@ async function compressOne(item,token,index,total){
 }
 async function compressBatch(){
   if(state.busy||state.zipBusy||!validTarget()||!candidates().length)return;
-  setError('');state.busy=true;state.cancelRequested=false;
+  setError('');state.busy=true;state.cancelRequested=false;state.sessionStarted=true;
   const token=++state.token;
   const pending=candidates();renderQueue();
   try{
@@ -415,6 +456,8 @@ async function compressBatch(){
     if(!state.cancelRequested){const fail=pending.filter(item=>item.status==='failed');if(fail.length)setError(`${fail.length} video(s) could not be compressed. See the message beside each file. You can retry them.`);}
   }finally{
     if(state.cancelRequested){for(const item of pending){if(item.status==='queued'){item.status='canceled';item.note='Not processed (batch canceled).';}}}
+    // The completed MP4 Blob URLs stay downloadable; only WASM heap is released.
+    terminateEngine();
     state.busy=false;state.active=null;state.phase=null;els.progress.hidden=true;
     state.cancelRequested=false;renderQueue();
   }
@@ -457,8 +500,8 @@ async function downloadAll(){
   }catch(e){setError(`ZIP download failed: ${e instanceof Error?e.message:String(e)}`);}
   finally{state.zipBusy=false;renderQueue();}
 }
-els.drop.addEventListener('click',()=>{if(!state.busy && !state.zipBusy)els.input.click();});
-els.drop.addEventListener('keydown',e=>{if(!state.busy && !state.zipBusy && (e.key==='Enter'||e.key===' ')){e.preventDefault();els.input.click();}});
+els.drop.addEventListener('click',()=>{if(!state.busy && !state.zipBusy && !state.sessionStarted)els.input.click();});
+els.drop.addEventListener('keydown',e=>{if(!state.busy && !state.zipBusy && !state.sessionStarted && (e.key==='Enter'||e.key===' ')){e.preventDefault();els.input.click();}});
 els.input.addEventListener('change',()=>{addFiles([...els.input.files]);els.input.value='';});
 els.button.addEventListener('click',compressBatch);els.cancel.addEventListener('click',cancelBatch);
 // Native number inputs change on trackpad/wheel when focused. Preserve typing and arrow keys.
@@ -469,9 +512,9 @@ els.target.addEventListener('input',()=>{
   // the size at which they were produced. Recompress explicitly to replace one.
   setError('');renderQueue();updateOutlook();
 });
-['dragenter','dragover'].forEach(event=>els.drop.addEventListener(event,e=>{e.preventDefault();if(!state.busy && !state.zipBusy)els.drop.classList.add('drag-over');}));
+['dragenter','dragover'].forEach(event=>els.drop.addEventListener(event,e=>{e.preventDefault();if(!state.busy && !state.zipBusy && !state.sessionStarted)els.drop.classList.add('drag-over');}));
 ['dragleave','drop'].forEach(event=>els.drop.addEventListener(event,e=>{e.preventDefault();els.drop.classList.remove('drag-over');}));
-els.drop.addEventListener('drop',e=>{if(!state.busy && !state.zipBusy)addFiles([...e.dataTransfer.files]);});
+els.drop.addEventListener('drop',e=>{if(!state.busy && !state.zipBusy && !state.sessionStarted)addFiles([...e.dataTransfer.files]);});
 window.addEventListener('dragover',e=>e.preventDefault());window.addEventListener('drop',e=>e.preventDefault());
 els.originalTab.addEventListener('click',()=>setPreviewMode('original'));
 els.outputTab.addEventListener('click',()=>setPreviewMode('output'));

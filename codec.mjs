@@ -78,6 +78,18 @@ export function makePlan({duration, targetMB, originalBytes, width=0, height=0, 
   return {targetBytes,totalBps,audioKbps,audioTotalKbps,audioCount:count,copyAudio,videoKbps,bpp,warning};
 }
 
+/** Choose a quality-first strategy without claiming to detect motion from metadata alone. */
+export function chooseEncodingStrategy(plan,{duration=0,sourceBytes=0,deviceMemory=0}={}) {
+  const gb=Number(deviceMemory);
+  const lowMemory=Number.isFinite(gb)&&gb>0&&gb<=4;
+  const constrained=Number.isFinite(plan.bpp)?plan.bpp<0.075:plan.videoKbps<600;
+  // Two-pass x264 improves bitrate allocation for demanding size targets, but
+  // is expensive in browser WASM; fall back to a fast single pass on large/low-RAM files.
+  const reasonable=duration>0&&duration<=120&&sourceBytes>0&&sourceBytes<=150*MB;
+  if(constrained&&reasonable&&!lowMemory)return {twoPass:true,preset:'medium'};
+  return {twoPass:false,preset:constrained?'fast':'veryfast'};
+}
+
 export function passArgs({input, output = 'compressed.mp4', videoKbps, audioKbps, pass, audioPresent = true, copyAudio = false}) {
   if (!/^[A-Za-z0-9_.-]+$/.test(input) || !/^[A-Za-z0-9_.-]+$/.test(output)) throw new Error('Invalid internal filename.');
   if (!Number.isFinite(videoKbps) || videoKbps < 70 || videoKbps > 1000000) throw new Error('Invalid video bitrate.');
@@ -149,11 +161,12 @@ export function safeDownloadName(filename) {
 
 /** Fast size-aware single-pass H.264 output; retry uses the same path with adjusted bitrate.
  *  Faster than mandatory two-pass, but size accuracy can be lower on unusual content. */
-export function fastArgs({input, output = 'compressed.mp4', videoKbps, audioKbps, audioPresent = true, copyAudio = false}) {
+export function fastArgs({input, output = 'compressed.mp4', videoKbps, audioKbps, audioPresent = true, copyAudio = false, preset = 'veryfast'}) {
   if (!/^[A-Za-z0-9_.-]+$/.test(input) || !/^[A-Za-z0-9_.-]+$/.test(output)) throw new Error('Invalid internal filename.');
   if (!Number.isFinite(videoKbps) || videoKbps < 70 || videoKbps > 1000000) throw new Error('Invalid video bitrate.');
+  if (!['veryfast','fast','medium'].includes(preset)) throw new Error('Invalid encoder preset.');
   const args = ['-hide_banner','-nostdin','-y','-i',input,
-    '-map','0:v:0','-c:v','libx264','-preset','veryfast',
+    '-map','0:v:0','-c:v','libx264','-preset',preset,
     '-b:v',`${Math.floor(videoKbps)}k`, '-maxrate',`${Math.ceil(videoKbps * 1.3)}k`,
     '-bufsize',`${Math.ceil(videoKbps * 2)}k`, '-pix_fmt','yuv420p', '-threads','1'];
   if (audioPresent) {
