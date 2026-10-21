@@ -31,3 +31,10 @@ Baseline GitHub `main`: `eacaa7dad6a5db03f26f59c6c52da64ad0879257`. Stability-on
 - **Two headless Chromium simulations passed** with console logging disabled: nine-file batch using structured FFprobe metadata and nine-file batch with FFprobe deliberately disabled. In both, all nine video items completed and produced download links. The FFmpeg engine was simulated; these are not real WebAssembly encodes.
 - Native `ffprobe` wrote and parsed a real 4-second H.264/AAC sample into JSON via `-o` without relying on logs; confirmed one video stream and one audio stream.
 - The previous v6 live failure has not been reproduced with an actual 56 MB source file inside a deployed browser. This is a targeted, source-backed fix with remaining live verification required.
+
+## v7 candidate evidence (2026-10-21)
+
+- Verified against source baseline `b336b07427ddbf20dd1a4cfbee8c5d41176bb96a`. Changed session lifecycle, encoder strategy and tests; layout and CDN loader remain unchanged.
+- Native FFmpeg 6-second 640x360/24fps moving sample, ~429KB matched file size: single-pass veryfast SSIM All 0.959456; two-pass medium SSIM All 0.960352. Encode CPU wall time 0.55 sec vs ~1.29 sec. This illustrates a small improvement on this fixture only; quality is content-dependent.
+- Strategy logic, 5-video limits, completed MP4 passthrough, FFmpeg argument construction are checked in source and the additional regression tests. GitHub-hosted CI and real WebAssembly/browser encodes are not yet verified in this candidate.
+- Existing browser CDN restrictions remain; a strict integrity-verified vendored core is a separate release risk. No quality score is claimed without comparing output to the original video.

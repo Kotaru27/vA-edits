@@ -1,4 +1,4 @@
-# Video Compressor — browser edition v6
+# Video Compressor — browser edition v7
 
 Private video compression directly in the browser, hosted as a static site on GitHub Pages.
 
@@ -71,3 +71,12 @@ The encoder, downloaded filenames, 8 MB default, and progress animation are unch
 ## Stream inspection reliability hotfix (2026-10-20)
 
 Source and output streams are now inspected through `FFmpeg.ffprobe()` with its JSON report written to the virtual filesystem. The previous approach rejected valid MP4s when FFmpeg's console log did not include a `Stream #... Video:` line, even though the file contained video. This could cause whole batches to fail before encoding. If FFprobe is unavailable, the fallback uses FFmpeg's exit status from a one-frame video decode, and checks audio tracks rather than assuming a missing log means silent video. The two short output-decode samples remain. Do not equate simulated worker/browser tests or native FFprobe with a verified live `ffmpeg.wasm` encode.
+
+
+## v7 — 5 videos per session, quality-first adaptive encoding
+
+- Up to five videos may be queued per session. The batch locks after its first start; retries and recompression of already selected items remain available. Download finished files and refresh to begin another session. Refresh discards the current results, so save downloads first. Browser/network cache is not guaranteed to clear on refresh.
+- Source MP4 files already below the chosen target are offered unchanged (original file bytes and filename). Non-MP4 files below target require a smaller target or an MP4 source.
+- For size-constrained clips up to 120 seconds / 150 MB on browsers not reporting 4 GB RAM or less, use two-pass x264 medium with the existing bitrate budget. Other jobs use single-pass veryfast/fast. Two-pass may fall back to single-pass fast if the WASM core cannot write pass statistics. Results may still exceed the target after one retry.
+- The FFmpeg worker is released at the end of every batch while completed Blob URLs remain available for download.
+- Quality outlook warnings remain bitrate estimates; no SSIM or other objective metric is claimed in the browser. Native FFmpeg benchmarks do not prove actual browser improvement. Layout and existing preview/download controls are unchanged.
